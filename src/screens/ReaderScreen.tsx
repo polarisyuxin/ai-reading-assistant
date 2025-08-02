@@ -37,6 +37,15 @@ export default function ReaderScreen() {
     }
   }, [currentBook?.id]);
 
+  // Debug settings changes
+  useEffect(() => {
+    console.log('🎨 Settings changed in Reader:', {
+      fontSize: settings.fontSize,
+      textColor: settings.textColor,
+      backgroundColor: settings.backgroundColor
+    });
+  }, [settings.fontSize, settings.textColor, settings.backgroundColor]);
+
   const startReading = async () => {
     if (!currentBook || !currentBook.content) {
       Alert.alert('Error', 'No content available to read');
@@ -177,7 +186,14 @@ export default function ReaderScreen() {
     if (!currentBook || !currentBook.content) {
       console.log('renderText: No book or content available');
       return (
-        <Text style={[styles.bookText, { color: settings.textColor, fontSize: settings.fontSize }]}>
+        <Text style={[
+          styles.bookText, 
+          { 
+            color: settings.textColor, 
+            fontSize: settings.fontSize,
+            lineHeight: settings.fontSize * 1.75
+          }
+        ]}>
           No content available
         </Text>
       );
@@ -187,20 +203,35 @@ export default function ReaderScreen() {
     if (!currentPage) {
       console.log('renderText: No current page available');
       return (
-        <Text style={[styles.bookText, { color: settings.textColor, fontSize: settings.fontSize }]}>
+        <Text style={[
+          styles.bookText, 
+          { 
+            color: settings.textColor, 
+            fontSize: settings.fontSize,
+            lineHeight: settings.fontSize * 1.75
+          }
+        ]}>
           No page content available
         </Text>
       );
     }
 
     console.log('renderText: Rendering page content, length:', currentPage.content.length);
+    console.log('📱 Current text style:', {
+      fontSize: settings.fontSize,
+      lineHeight: settings.fontSize * 1.75,
+      textColor: settings.textColor
+    });
+    
+    const textStyle = {
+      color: settings.textColor, 
+      fontSize: settings.fontSize,
+      lineHeight: settings.fontSize * 1.75
+    };
     
     return (
       <View>
-        <Text style={[
-          styles.bookText,
-          { color: settings.textColor, fontSize: settings.fontSize }
-        ]}>
+        <Text style={[styles.bookText, textStyle]}>
           {currentPage.content}
         </Text>
       </View>
@@ -329,7 +360,6 @@ const styles = StyleSheet.create({
     padding: 20,
   },
   bookText: {
-    lineHeight: 28,
     textAlign: 'justify',
   },
   currentText: {

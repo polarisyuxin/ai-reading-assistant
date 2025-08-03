@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   Alert,
   Platform,
   PanResponder,
+  FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Speech from 'expo-speech';
@@ -31,7 +32,7 @@ export default function ReaderScreen() {
   const [remainingTime, setRemainingTime] = useState<number>(0);
   const [showSpeedModal, setShowSpeedModal] = useState(false);
   const [cachedWordCount, setCachedWordCount] = useState<number>(0);
-  const scrollViewRef = useRef<ScrollView>(null);
+  const flatListRef = useRef<FlatList>(null);
   const [lastBookId, setLastBookId] = useState<string | null>(null);
   const [renderKey, setRenderKey] = useState(0);
 
@@ -97,13 +98,8 @@ export default function ReaderScreen() {
       return;
     }
 
-    const currentPage = getCurrentPage();
-    if (!currentPage) {
-      Alert.alert('Error', 'No page content found');
-      return;
-    }
-
-    const textToRead = currentPage.content;
+    // For scroll-based reading, we'll read the entire content or from current scroll position
+    const textToRead = currentBook.content;
     
     if (!textToRead.trim()) {
       Alert.alert('Error', 'No text content found on this page');
@@ -130,13 +126,7 @@ export default function ReaderScreen() {
       language: ttsLanguage,
       onDone: () => {
         dispatch({ type: 'SET_PLAYING', payload: false });
-        // Auto-advance to next page if available
-        if (currentBook.currentPage < currentBook.totalPages) {
-          dispatch({
-            type: 'UPDATE_CURRENT_PAGE',
-            payload: { bookId: currentBook.id, page: currentBook.currentPage + 1 },
-          });
-        }
+        // TTS is done reading the entire content
       },
       onStopped: () => {
         dispatch({ type: 'SET_PLAYING', payload: false });
@@ -224,11 +214,87 @@ export default function ReaderScreen() {
     return page;
   };
 
-  const renderText = () => {
-    console.log('renderText: Current book:', currentBook?.title, 'Content length:', currentBook?.content?.length);
+  // Content chunking constants
+  const CHUNK_SIZE = 2000; // Characters per chunk for optimal performance
+
+  // Memoized content chunks for performance
+  const contentChunks: ChunkItem[] = useMemo(() => {
+    if (!currentBook?.content) return [];
     
+    const content = currentBook.content;
+    const chunks = [];
+    
+    // Split content at natural break points (sentences/paragraphs) when possible
+    for (let i = 0; i < content.length; i += CHUNK_SIZE) {
+      let endIndex = Math.min(i + CHUNK_SIZE, content.length);
+      
+      // Try to find a natural break point near the end of the chunk
+      if (endIndex < content.length) {
+        const searchEnd = Math.min(endIndex + 200, content.length);
+        const naturalBreaks = ['\n\n', '. ', '! ', '? '];
+        
+        for (const breakPoint of naturalBreaks) {
+          const breakIndex = content.lastIndexOf(breakPoint, searchEnd);
+          if (breakIndex > endIndex - 100 && breakIndex < searchEnd) {
+            endIndex = breakIndex + breakPoint.length;
+            break;
+          }
+        }
+      }
+      
+      const chunk = content.substring(i, endIndex);
+      chunks.push({
+        id: i.toString(),
+        text: chunk,
+        startIndex: i,
+        endIndex: endIndex
+      });
+      
+      // Update i to the actual end index for next iteration
+      i = endIndex - CHUNK_SIZE;
+    }
+    
+    console.log(`📚 Content chunked into ${chunks.length} pieces for smooth scrolling`);
+    return chunks;
+  }, [currentBook?.content, CHUNK_SIZE]);
+  
+  // iOS-specific text styling
+  const getTextStyle = () => Platform.select({
+    ios: {
+      color: settings.textColor, 
+      fontSize: settings.fontSize,
+      lineHeight: Platform.OS === 'ios' ? settings.fontSize * 1.6 : settings.fontSize * 1.75,
+      fontFamily: Platform.OS === 'ios' ? 'System' : undefined,
+    },
+    default: {
+      color: settings.textColor, 
+      fontSize: settings.fontSize,
+      lineHeight: settings.fontSize * 1.75,
+    }
+  });
+  
+  const renderChunk = ({ item, index }: { item: ChunkItem; index: number }) => {
+    return (
+      <View style={styles.chunkContainer}>
+        <Text 
+          key={item.id}
+          style={[styles.bookText, getTextStyle()]}
+          onLayout={(event) => {
+            // Update estimated height based on actual rendered height
+            if (index === 0) {
+              const { height } = event.nativeEvent.layout;
+              setEstimatedItemHeight(height);
+            }
+          }}
+        >
+          {item.text}
+        </Text>
+      </View>
+    );
+  };
+  
+  const renderContent = () => {
     if (!currentBook || !currentBook.content) {
-      console.log('renderText: No book or content available');
       const noContentStyle = Platform.select({
         ios: {
           color: settings.textColor, 
@@ -243,63 +309,42 @@ export default function ReaderScreen() {
         }
       });
       return (
-        <Text style={[styles.bookText, noContentStyle]}>
-          No content available
-        </Text>
+        <View style={styles.textContent}>
+          <Text style={[styles.bookText, noContentStyle]}>
+            No content available
+          </Text>
+        </View>
       );
     }
 
-    const currentPage = getCurrentPage();
-    if (!currentPage) {
-      console.log('renderText: No current page available');
-      const noPageStyle = Platform.select({
-        ios: {
-          color: settings.textColor, 
-          fontSize: settings.fontSize,
-          lineHeight: settings.fontSize * 1.6,
-          fontFamily: 'System',
-        },
-        default: {
-          color: settings.textColor, 
-          fontSize: settings.fontSize,
-          lineHeight: settings.fontSize * 1.75,
-        }
-      });
-      return (
-        <Text style={[styles.bookText, noPageStyle]}>
-          No page content available
-        </Text>
-      );
-    }
-
-    console.log('renderText: Rendering page content, length:', currentPage.content.length);
-    console.log('📱 Current text style:', {
-      fontSize: settings.fontSize,
-      lineHeight: settings.fontSize * 1.75,
-      textColor: settings.textColor
-    });
-    
-    // iOS-specific text styling
-    const textStyle = Platform.select({
-      ios: {
-        color: settings.textColor, 
-        fontSize: settings.fontSize,
-        lineHeight: Platform.OS === 'ios' ? settings.fontSize * 1.6 : settings.fontSize * 1.75,
-        fontFamily: Platform.OS === 'ios' ? 'System' : undefined,
-      },
-      default: {
-        color: settings.textColor, 
-        fontSize: settings.fontSize,
-        lineHeight: settings.fontSize * 1.75,
-      }
-    });
+    console.log('📱 Rendering optimized content with', contentChunks.length, 'chunks');
     
     return (
-      <View key={`text-${renderKey}`}>
-        <Text style={[styles.bookText, textStyle]}>
-          {currentPage.content}
-        </Text>
-      </View>
+      <FlatList
+        ref={flatListRef}
+        data={contentChunks}
+        renderItem={renderChunk}
+        keyExtractor={(item) => item.id}
+        removeClippedSubviews={true}
+        maxToRenderPerBatch={5}
+        windowSize={10}
+        initialNumToRender={3}
+        updateCellsBatchingPeriod={50}
+        getItemLayout={(data, index) => ({
+          length: estimatedItemHeight,
+          offset: estimatedItemHeight * index,
+          index,
+        })}
+        showsVerticalScrollIndicator={true}
+        scrollEventThrottle={16}
+        onScroll={handleScroll}
+        onContentSizeChange={(width, height) => setContentHeight(height)}
+        onLayout={(event) => {
+          const { height } = event.nativeEvent.layout;
+          setContainerHeight(height);
+        }}
+        contentContainerStyle={styles.textContent}
+      />
     );
   };
 
@@ -315,24 +360,34 @@ export default function ReaderScreen() {
     setShowChapterModal(false);
   };
 
-  const handleContentPress = (event: any) => {
-    const { locationX } = event.nativeEvent;
-    const screenWidth = event.target.layout?.width || 400;
+  // Track scroll position for TTS synchronization and current position state
+  const [currentScrollY, setCurrentScrollY] = useState(0);
+  const [estimatedItemHeight, setEstimatedItemHeight] = useState(100); // Dynamic height estimation
+  
+  // Define chunk item type
+  interface ChunkItem {
+    id: string;
+    text: string;
+    startIndex: number;
+    endIndex: number;
+  }
+  
+  const handleScroll = (event: any) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const scrollY = contentOffset.y;
+    setCurrentScrollY(scrollY);
     
-    if (locationX < screenWidth / 2) {
-      // Left side - previous page
-      if (currentBook.currentPage > 1) {
+    const scrollProgress = contentSize.height > layoutMeasurement.height 
+      ? scrollY / (contentSize.height - layoutMeasurement.height) 
+      : 0;
+    
+    // Update current page based on scroll position for TTS and progress tracking
+    if (currentBook && currentBook.totalPages > 0) {
+      const estimatedPage = Math.max(1, Math.min(currentBook.totalPages, Math.ceil(scrollProgress * currentBook.totalPages)));
+      if (estimatedPage !== currentBook.currentPage) {
         dispatch({
           type: 'UPDATE_CURRENT_PAGE',
-          payload: { bookId: currentBook.id, page: currentBook.currentPage - 1 },
-        });
-      }
-    } else {
-      // Right side - next page
-      if (currentBook.currentPage < currentBook.totalPages) {
-        dispatch({
-          type: 'UPDATE_CURRENT_PAGE',
-          payload: { bookId: currentBook.id, page: currentBook.currentPage + 1 },
+          payload: { bookId: currentBook.id, page: estimatedPage },
         });
       }
     }
@@ -483,9 +538,14 @@ export default function ReaderScreen() {
     }
   };
 
-  const calculatePageFromPosition = (locationX: number) => {
+  // Track content size for scroll-based progress
+  const [contentHeight, setContentHeight] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(0);
+  
+  const calculateScrollFromPosition = (locationX: number) => {
     const percentage = Math.max(0, Math.min(1, locationX / progressBarWidth));
-    return Math.max(1, Math.min(currentBook.totalPages, Math.round(percentage * currentBook.totalPages)));
+    const maxScroll = Math.max(0, contentHeight - containerHeight);
+    return percentage * maxScroll;
   };
 
   const panResponder = PanResponder.create({
@@ -494,28 +554,18 @@ export default function ReaderScreen() {
     
     onPanResponderGrant: (event) => {
       setIsDragging(true);
-      const { locationX } = event.nativeEvent;
-      const targetPage = calculatePageFromPosition(locationX);
-      setTempPage(targetPage);
     },
     
     onPanResponderMove: (event) => {
       const { locationX } = event.nativeEvent;
-      const targetPage = calculatePageFromPosition(locationX);
-      setTempPage(targetPage);
+      const targetScroll = calculateScrollFromPosition(locationX);
+      if (flatListRef.current) {
+        flatListRef.current.scrollToOffset({ offset: targetScroll, animated: false });
+      }
     },
     
     onPanResponderRelease: (event) => {
-      const { locationX } = event.nativeEvent;
-      const targetPage = calculatePageFromPosition(locationX);
-      
-      dispatch({
-        type: 'UPDATE_CURRENT_PAGE',
-        payload: { bookId: currentBook.id, page: targetPage },
-      });
-      
       setIsDragging(false);
-      setTempPage(targetPage);
     },
   });
 
@@ -545,23 +595,9 @@ export default function ReaderScreen() {
         </View>
       </View>
 
-      <TouchableOpacity 
-        style={styles.contentArea}
-        onPress={handleContentPress}
-        activeOpacity={1}
-      >
-        <ScrollView
-          key={`scroll-${settings.fontSize}-${renderKey}`}
-          ref={scrollViewRef}
-          style={styles.textContainer}
-          contentContainerStyle={styles.textContent}
-          showsVerticalScrollIndicator={false}
-          scrollEventThrottle={16}
-          scrollEnabled={false}
-        >
-          {renderText()}
-        </ScrollView>
-      </TouchableOpacity>
+      <View style={[styles.contentArea, styles.textContainer]}>
+        {renderContent()}
+      </View>
 
       <View style={styles.bottomBar}>
         <View style={styles.audioPlayerContainer}>
@@ -589,9 +625,9 @@ export default function ReaderScreen() {
                   style={[
                     styles.progressFill, 
                     { 
-                      width: isDragging 
-                        ? `${(tempPage / currentBook.totalPages) * 100}%`
-                        : `${(currentBook.currentPage / currentBook.totalPages) * 100}%`
+                      width: contentHeight > containerHeight 
+                        ? `${(currentScrollY / (contentHeight - containerHeight)) * 100}%`
+                        : '0%'
                     }
                   ]} 
                 />
@@ -599,9 +635,9 @@ export default function ReaderScreen() {
                   style={[
                     styles.progressThumb,
                     { 
-                      left: isDragging 
-                        ? `${(tempPage / currentBook.totalPages) * 100}%`
-                        : `${(currentBook.currentPage / currentBook.totalPages) * 100}%`
+                      left: contentHeight > containerHeight 
+                        ? `${(currentScrollY / (contentHeight - containerHeight)) * 100}%`
+                        : '0%'
                     }
                   ]}
                 />
@@ -633,17 +669,11 @@ export default function ReaderScreen() {
             <TouchableOpacity 
               style={styles.skipButton}
               onPress={() => {
-                // Rewind 15 seconds worth of content
-                const wordsPerMinute = calculateWordsPerMinute(settings.speechRate);
-                const wordsPerSecond = wordsPerMinute / 60;
-                const wordsToRewind = wordsPerSecond * 15;
-                // Approximate page rewind based on average words per page
-                const pagesToRewind = Math.max(1, Math.round(wordsToRewind / 200));
-                const newPage = Math.max(1, currentBook.currentPage - pagesToRewind);
-                dispatch({
-                  type: 'UPDATE_CURRENT_PAGE',
-                  payload: { bookId: currentBook.id, page: newPage },
-                });
+                // Scroll up (rewind) by a reasonable amount
+                if (flatListRef.current) {
+                  const newY = Math.max(0, currentScrollY - 300);
+                  flatListRef.current.scrollToOffset({ offset: newY, animated: true });
+                }
               }}
             >
               <Ionicons name="play-back" size={24} color="#666" />
@@ -663,16 +693,10 @@ export default function ReaderScreen() {
             <TouchableOpacity 
               style={styles.skipButton}
               onPress={() => {
-                // Forward 15 seconds worth of content
-                const wordsPerMinute = calculateWordsPerMinute(settings.speechRate);
-                const wordsPerSecond = wordsPerMinute / 60;
-                const wordsToForward = wordsPerSecond * 15;
-                const pagesToForward = Math.max(1, Math.round(wordsToForward / 200));
-                const newPage = Math.min(currentBook.totalPages, currentBook.currentPage + pagesToForward);
-                dispatch({
-                  type: 'UPDATE_CURRENT_PAGE',
-                  payload: { bookId: currentBook.id, page: newPage },
-                });
+                // Scroll down (forward) by a reasonable amount
+                if (flatListRef.current) {
+                  flatListRef.current.scrollToOffset({ offset: currentScrollY + 300, animated: true });
+                }
               }}
             >
               <Ionicons name="play-forward" size={24} color="#666" />
@@ -980,6 +1004,9 @@ const styles = StyleSheet.create({
   bookText: {
     textAlign: 'left',
     writingDirection: 'ltr',
+  },
+  chunkContainer: {
+    paddingBottom: 4, // Small spacing between chunks
   },
   bottomBar: {
     paddingHorizontal: 20,

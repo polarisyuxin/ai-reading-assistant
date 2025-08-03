@@ -4,7 +4,7 @@ import { countWords } from './textUtils';
  * Calculate reading time based on content and reading speed
  */
 export function calculateReadingTime(content: string, wordsPerMinute: number = 200): number {
-  const wordCount = countWords(content).totalWords;
+  const wordCount = countWords(content).words;
   return Math.ceil(wordCount / wordsPerMinute); // Return time in minutes
 }
 

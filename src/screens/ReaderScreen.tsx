@@ -216,47 +216,76 @@ export default function ReaderScreen() {
 
   // Content chunking constants
   const CHUNK_SIZE = 2000; // Characters per chunk for optimal performance
-
-  // Memoized content chunks for performance
-  const contentChunks: ChunkItem[] = useMemo(() => {
-    if (!currentBook?.content) return [];
-    
-    const content = currentBook.content;
-    const chunks = [];
-    
-    // Split content at natural break points (sentences/paragraphs) when possible
-    for (let i = 0; i < content.length; i += CHUNK_SIZE) {
-      let endIndex = Math.min(i + CHUNK_SIZE, content.length);
-      
-      // Try to find a natural break point near the end of the chunk
-      if (endIndex < content.length) {
-        const searchEnd = Math.min(endIndex + 200, content.length);
-        const naturalBreaks = ['\n\n', '. ', '! ', '? '];
+  
+  // Asynchronous content chunking to prevent UI blocking
+  const chunkContentAsync = async (content: string): Promise<ChunkItem[]> => {
+    return new Promise((resolve) => {
+      // Use requestIdleCallback or setTimeout to make chunking non-blocking
+      const processChunks = () => {
+        const chunks: ChunkItem[] = [];
         
-        for (const breakPoint of naturalBreaks) {
-          const breakIndex = content.lastIndexOf(breakPoint, searchEnd);
-          if (breakIndex > endIndex - 100 && breakIndex < searchEnd) {
-            endIndex = breakIndex + breakPoint.length;
-            break;
+        // Split content at natural break points (sentences/paragraphs) when possible
+        for (let i = 0; i < content.length; i += CHUNK_SIZE) {
+          let endIndex = Math.min(i + CHUNK_SIZE, content.length);
+          
+          // Try to find a natural break point near the end of the chunk
+          if (endIndex < content.length) {
+            const searchEnd = Math.min(endIndex + 200, content.length);
+            const naturalBreaks = ['\n\n', '. ', '! ', '? '];
+            
+            for (const breakPoint of naturalBreaks) {
+              const breakIndex = content.lastIndexOf(breakPoint, searchEnd);
+              if (breakIndex > endIndex - 100 && breakIndex < searchEnd) {
+                endIndex = breakIndex + breakPoint.length;
+                break;
+              }
+            }
           }
+          
+          const chunk = content.substring(i, endIndex);
+          chunks.push({
+            id: i.toString(),
+            text: chunk,
+            startIndex: i,
+            endIndex: endIndex
+          });
+          
+          // Update i to the actual end index for next iteration
+          i = endIndex - CHUNK_SIZE;
         }
-      }
+        
+        console.log(`📚 Content chunked into ${chunks.length} pieces for smooth scrolling`);
+        resolve(chunks);
+      };
       
-      const chunk = content.substring(i, endIndex);
-      chunks.push({
-        id: i.toString(),
-        text: chunk,
-        startIndex: i,
-        endIndex: endIndex
-      });
+      // Use setTimeout to prevent blocking
+      setTimeout(processChunks, 0);
+    });
+  };
+  
+  // Load content chunks when book changes
+  useEffect(() => {
+    if (currentBook?.content && currentBook.id !== lastBookId) {
+      console.log('🚀 Starting content processing for smooth transition');
+      setIsContentLoading(true);
+      setContentChunks([]); // Clear previous chunks immediately
       
-      // Update i to the actual end index for next iteration
-      i = endIndex - CHUNK_SIZE;
+      // Start chunking process
+      chunkContentAsync(currentBook.content)
+        .then((chunks) => {
+          setContentChunks(chunks);
+          setIsContentLoading(false);
+          console.log('✅ Content ready for smooth scrolling');
+        })
+        .catch((error) => {
+          console.error('❌ Error chunking content:', error);
+          setIsContentLoading(false);
+        });
+    } else if (!currentBook?.content) {
+      setContentChunks([]);
+      setIsContentLoading(false);
     }
-    
-    console.log(`📚 Content chunked into ${chunks.length} pieces for smooth scrolling`);
-    return chunks;
-  }, [currentBook?.content, CHUNK_SIZE]);
+  }, [currentBook?.content, currentBook?.id, lastBookId]);
   
   // iOS-specific text styling
   const getTextStyle = () => Platform.select({
@@ -293,6 +322,33 @@ export default function ReaderScreen() {
     );
   };
   
+  const renderLoadingSkeleton = () => {
+    return (
+      <View style={styles.textContent}>
+        <View style={styles.loadingContainer}>
+          {/* Skeleton lines for loading state */}
+          {Array.from({ length: 8 }).map((_, index) => (
+            <View
+              key={index}
+              style={[
+                styles.skeletonLine,
+                {
+                  width: index === 7 ? '60%' : '100%', // Last line shorter
+                  backgroundColor: settings.textColor + '20', // 20% opacity
+                }
+              ]}
+            />
+          ))}
+        </View>
+        <View style={styles.loadingTextContainer}>
+          <Text style={[styles.loadingText, { color: settings.textColor + '80' }]}>
+            Preparing content for smooth reading...
+          </Text>
+        </View>
+      </View>
+    );
+  };
+
   const renderContent = () => {
     if (!currentBook || !currentBook.content) {
       const noContentStyle = Platform.select({
@@ -315,6 +371,11 @@ export default function ReaderScreen() {
           </Text>
         </View>
       );
+    }
+
+    // Show loading skeleton while content is being processed
+    if (isContentLoading || contentChunks.length === 0) {
+      return renderLoadingSkeleton();
     }
 
     console.log('📱 Rendering optimized content with', contentChunks.length, 'chunks');
@@ -363,6 +424,10 @@ export default function ReaderScreen() {
   // Track scroll position for TTS synchronization and current position state
   const [currentScrollY, setCurrentScrollY] = useState(0);
   const [estimatedItemHeight, setEstimatedItemHeight] = useState(100); // Dynamic height estimation
+  
+  // Loading and content state
+  const [isContentLoading, setIsContentLoading] = useState(false);
+  const [contentChunks, setContentChunks] = useState<ChunkItem[]>([]);
   
   // Define chunk item type
   interface ChunkItem {
@@ -1007,6 +1072,23 @@ const styles = StyleSheet.create({
   },
   chunkContainer: {
     paddingBottom: 4, // Small spacing between chunks
+  },
+  loadingContainer: {
+    paddingVertical: 20,
+  },
+  skeletonLine: {
+    height: 16,
+    borderRadius: 8,
+    marginBottom: 12,
+    opacity: 0.6,
+  },
+  loadingTextContainer: {
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  loadingText: {
+    fontSize: 14,
+    fontStyle: 'italic',
   },
   bottomBar: {
     paddingHorizontal: 20,

@@ -9,7 +9,6 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import Slider from '@react-native-community/slider';
 import { useAppContext } from '../context/AppContext';
 import { clearAllData, debugStoredData } from '../utils/debugUtils';
 import { createSampleTxtFile, createChineseSampleTxtFile } from '../utils/testUtils';
@@ -188,34 +187,50 @@ export default function SettingsScreen() {
           title="Speech Rate" 
           subtitle={`${settings.speechRate.toFixed(1)}x`}
         >
-          <Slider
-            key="speechRate-slider"
-            style={styles.slider}
-            minimumValue={0.5}
-            maximumValue={2.0}
-            step={0.1}
-            value={settings.speechRate}
-            onValueChange={(value) => updateSetting('speechRate', value)}
-            minimumTrackTintColor="#007AFF"
-            maximumTrackTintColor="#E0E0E0"
-          />
+          <View style={styles.buttonControls}>
+            <TouchableOpacity
+              style={[styles.controlButton, settings.speechRate <= 0.5 && styles.disabledButton]}
+              onPress={() => updateSetting('speechRate', Math.max(0.5, settings.speechRate - 0.1))}
+              disabled={settings.speechRate <= 0.5}
+            >
+              <Ionicons name="remove" size={16} color={settings.speechRate <= 0.5 ? "#ccc" : "#007AFF"} />
+            </TouchableOpacity>
+            
+            <Text style={styles.valueText}>{settings.speechRate.toFixed(1)}x</Text>
+            
+            <TouchableOpacity
+              style={[styles.controlButton, settings.speechRate >= 2.0 && styles.disabledButton]}
+              onPress={() => updateSetting('speechRate', Math.min(2.0, settings.speechRate + 0.1))}
+              disabled={settings.speechRate >= 2.0}
+            >
+              <Ionicons name="add" size={16} color={settings.speechRate >= 2.0 ? "#ccc" : "#007AFF"} />
+            </TouchableOpacity>
+          </View>
         </SettingRow>
 
         <SettingRow 
           title="Speech Pitch" 
           subtitle={`${settings.speechPitch.toFixed(1)}`}
         >
-          <Slider
-            key="speechPitch-slider"
-            style={styles.slider}
-            minimumValue={0.5}
-            maximumValue={2.0}
-            step={0.1}
-            value={settings.speechPitch}
-            onValueChange={(value) => updateSetting('speechPitch', value)}
-            minimumTrackTintColor="#007AFF"
-            maximumTrackTintColor="#E0E0E0"
-          />
+          <View style={styles.buttonControls}>
+            <TouchableOpacity
+              style={[styles.controlButton, settings.speechPitch <= 0.5 && styles.disabledButton]}
+              onPress={() => updateSetting('speechPitch', Math.max(0.5, settings.speechPitch - 0.1))}
+              disabled={settings.speechPitch <= 0.5}
+            >
+              <Ionicons name="remove" size={16} color={settings.speechPitch <= 0.5 ? "#ccc" : "#007AFF"} />
+            </TouchableOpacity>
+            
+            <Text style={styles.valueText}>{settings.speechPitch.toFixed(1)}</Text>
+            
+            <TouchableOpacity
+              style={[styles.controlButton, settings.speechPitch >= 2.0 && styles.disabledButton]}
+              onPress={() => updateSetting('speechPitch', Math.min(2.0, settings.speechPitch + 0.1))}
+              disabled={settings.speechPitch >= 2.0}
+            >
+              <Ionicons name="add" size={16} color={settings.speechPitch >= 2.0 ? "#ccc" : "#007AFF"} />
+            </TouchableOpacity>
+          </View>
         </SettingRow>
 
         <SettingRow 
@@ -257,17 +272,25 @@ export default function SettingsScreen() {
           title="Font Size" 
           subtitle={`${settings.fontSize}pt`}
         >
-          <Slider
-            key="fontSize-slider"
-            style={styles.slider}
-            minimumValue={12}
-            maximumValue={24}
-            step={1}
-            value={settings.fontSize}
-            onValueChange={(value) => updateSetting('fontSize', value)}
-            minimumTrackTintColor="#007AFF"
-            maximumTrackTintColor="#E0E0E0"
-          />
+          <View style={styles.buttonControls}>
+            <TouchableOpacity
+              style={[styles.controlButton, settings.fontSize <= 12 && styles.disabledButton]}
+              onPress={() => updateSetting('fontSize', Math.max(12, settings.fontSize - 1))}
+              disabled={settings.fontSize <= 12}
+            >
+              <Ionicons name="remove" size={16} color={settings.fontSize <= 12 ? "#ccc" : "#007AFF"} />
+            </TouchableOpacity>
+            
+            <Text style={styles.valueText}>{settings.fontSize}pt</Text>
+            
+            <TouchableOpacity
+              style={[styles.controlButton, settings.fontSize >= 24 && styles.disabledButton]}
+              onPress={() => updateSetting('fontSize', Math.min(24, settings.fontSize + 1))}
+              disabled={settings.fontSize >= 24}
+            >
+              <Ionicons name="add" size={16} color={settings.fontSize >= 24 ? "#ccc" : "#007AFF"} />
+            </TouchableOpacity>
+          </View>
         </SettingRow>
 
         <SettingRow title="Background Color">
@@ -394,6 +417,33 @@ const styles = StyleSheet.create({
   slider: {
     width: 120,
     height: 40,
+  },
+  buttonControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: 120,
+  },
+  controlButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f8f9fa',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+  },
+  disabledButton: {
+    backgroundColor: '#f5f5f5',
+    borderColor: '#e8e8e8',
+  },
+  valueText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#007AFF',
+    minWidth: 50,
+    textAlign: 'center',
   },
   colorOptions: {
     flexDirection: 'row',

@@ -48,6 +48,7 @@ export default function ReaderScreen() {
   const [isDragging, setIsDragging] = useState(false);
   const [dragPosition, setDragPosition] = useState(0); // Track drag position as percentage (0-1)
   const [isScrollingToPosition, setIsScrollingToPosition] = useState(false); // Track if we're scrolling to drag position
+  const [dragStartOffset, setDragStartOffset] = useState(0); // Track initial touch offset from thumb center
   const [, setTempPage] = useState(currentBook?.currentPage || 1);
   const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
@@ -641,24 +642,38 @@ export default function ReaderScreen() {
     onPanResponderGrant: (event) => {
       console.log('🎯 Progress bar drag started');
       setIsDragging(true);
-      // Set initial drag position based on current progress
-      setDragPosition(getCurrentProgressPercentage());
+      
+      const { locationX } = event.nativeEvent;
+      
+      // For smooth tracking, we want the thumb to move directly to where the user touches
+      // Calculate the percentage based on touch position
+      const initialPercentage = Math.max(0, Math.min(1, locationX / progressBarWidth));
+      
+      // Set drag position to follow finger immediately - no offset needed for smooth tracking
+      setDragPosition(initialPercentage);
+      setDragStartOffset(0); // Reset offset since we're doing direct tracking
+      
+      console.log('🎯 Drag started - Touch at:', locationX, 'Width:', progressBarWidth, 'Initial percentage:', initialPercentage.toFixed(3));
     },
     
     onPanResponderMove: (event) => {
       const { locationX } = event.nativeEvent;
-      const percentage = calculateProgressPercentage(locationX);
       
-      // Update drag position immediately for visual feedback
+      // For smooth tracking, directly convert touch position to percentage
+      // The thumb should follow the finger exactly
+      const percentage = Math.max(0, Math.min(1, locationX / progressBarWidth));
+      
+      // Update drag position immediately for smooth visual tracking
       setDragPosition(percentage);
       
       // Don't scroll content during drag - only update visual indicator
-      console.log('🎯 Drag position updated:', percentage);
+      console.log('👆 Finger tracking - Touch at:', locationX.toFixed(1), 'Percentage:', percentage.toFixed(3));
     },
     
     onPanResponderRelease: (event) => {
       console.log('🎯 Progress bar drag released at position:', dragPosition);
       setIsDragging(false);
+      setDragStartOffset(0); // Reset offset
       
       // Set scrolling state to prevent slider updates
       setIsScrollingToPosition(true);
@@ -1148,7 +1163,8 @@ const styles = StyleSheet.create({
   },
   progressBarContainer: {
     width: '100%',
-    paddingVertical: 8,
+    paddingVertical: 12, // Increased touch area for better responsiveness
+    paddingHorizontal: 4, // Small horizontal padding for edge touches
   },
   progressBar: {
     width: '100%',

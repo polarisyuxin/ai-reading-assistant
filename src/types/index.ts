@@ -39,7 +39,6 @@ export interface Highlight {
 
 export interface ReadingSettings {
   speechRate: number;
-  speechPitch: number;
   speechVoice?: string;
   speechLanguage: string; // Language code for TTS (e.g., 'zh-CN', 'en-US')
   fontSize: number;

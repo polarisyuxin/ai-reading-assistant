@@ -85,7 +85,6 @@ export default function SettingsScreen() {
             // Reset app state
             dispatch({ type: 'LOAD_DATA', payload: { books: [], settings: {
               speechRate: 1.0,
-              speechPitch: 1.0,
               speechLanguage: 'en-US',
               fontSize: 16,
               backgroundColor: '#ffffff',
@@ -208,30 +207,6 @@ export default function SettingsScreen() {
           </View>
         </SettingRow>
 
-        <SettingRow 
-          title="Speech Pitch" 
-          subtitle={`${settings.speechPitch.toFixed(1)}`}
-        >
-          <View style={styles.buttonControls}>
-            <TouchableOpacity
-              style={[styles.controlButton, settings.speechPitch <= 0.5 && styles.disabledButton]}
-              onPress={() => updateSetting('speechPitch', Math.max(0.5, settings.speechPitch - 0.1))}
-              disabled={settings.speechPitch <= 0.5}
-            >
-              <Ionicons name="remove" size={16} color={settings.speechPitch <= 0.5 ? "#ccc" : "#007AFF"} />
-            </TouchableOpacity>
-            
-            <Text style={styles.valueText}>{settings.speechPitch.toFixed(1)}</Text>
-            
-            <TouchableOpacity
-              style={[styles.controlButton, settings.speechPitch >= 2.0 && styles.disabledButton]}
-              onPress={() => updateSetting('speechPitch', Math.min(2.0, settings.speechPitch + 0.1))}
-              disabled={settings.speechPitch >= 2.0}
-            >
-              <Ionicons name="add" size={16} color={settings.speechPitch >= 2.0 ? "#ccc" : "#007AFF"} />
-            </TouchableOpacity>
-          </View>
-        </SettingRow>
 
         <SettingRow 
           title="Speech Language" 

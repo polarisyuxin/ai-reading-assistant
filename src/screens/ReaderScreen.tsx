@@ -100,7 +100,6 @@ export default function ReaderScreen() {
 
     Speech.speak(textToRead, {
       rate: settings.speechRate,
-      pitch: settings.speechPitch,
       voice: settings.speechVoice,
       language: ttsLanguage,
       onDone: () => {

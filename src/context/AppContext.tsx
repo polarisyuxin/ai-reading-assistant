@@ -27,7 +27,6 @@ const initialState: AppState = {
   currentBook: null,
   settings: {
     speechRate: 1.0,
-    speechPitch: 1.0,
     speechLanguage: 'en-US', // Default to English, will auto-detect from text
     fontSize: 16,
     backgroundColor: '#ffffff',

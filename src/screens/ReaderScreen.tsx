@@ -322,32 +322,6 @@ export default function ReaderScreen() {
     );
   };
   
-  const renderLoadingSkeleton = () => {
-    return (
-      <View style={styles.textContent}>
-        <View style={styles.loadingContainer}>
-          {/* Skeleton lines for loading state */}
-          {Array.from({ length: 8 }).map((_, index) => (
-            <View
-              key={index}
-              style={[
-                styles.skeletonLine,
-                {
-                  width: index === 7 ? '60%' : '100%', // Last line shorter
-                  backgroundColor: settings.textColor + '20', // 20% opacity
-                }
-              ]}
-            />
-          ))}
-        </View>
-        <View style={styles.loadingTextContainer}>
-          <Text style={[styles.loadingText, { color: settings.textColor + '80' }]}>
-            Preparing content for smooth reading...
-          </Text>
-        </View>
-      </View>
-    );
-  };
 
   const renderContent = () => {
     if (!currentBook || !currentBook.content) {
@@ -373,9 +347,9 @@ export default function ReaderScreen() {
       );
     }
 
-    // Show loading skeleton while content is being processed
-    if (isContentLoading || contentChunks.length === 0) {
-      return renderLoadingSkeleton();
+    // Show empty content only while initially loading (no skeleton UI)
+    if (contentChunks.length === 0 && isContentLoading) {
+      return <View style={styles.textContent} />;
     }
 
     console.log('📱 Rendering optimized content with', contentChunks.length, 'chunks');
@@ -1072,23 +1046,6 @@ const styles = StyleSheet.create({
   },
   chunkContainer: {
     paddingBottom: 4, // Small spacing between chunks
-  },
-  loadingContainer: {
-    paddingVertical: 20,
-  },
-  skeletonLine: {
-    height: 16,
-    borderRadius: 8,
-    marginBottom: 12,
-    opacity: 0.6,
-  },
-  loadingTextContainer: {
-    alignItems: 'center',
-    marginTop: 20,
-  },
-  loadingText: {
-    fontSize: 14,
-    fontStyle: 'italic',
   },
   bottomBar: {
     paddingHorizontal: 20,

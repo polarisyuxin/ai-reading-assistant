@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -19,28 +19,52 @@ import { Book } from '../types';
 export default function SettingsScreen() {
   const { state, dispatch } = useAppContext();
   const { settings } = state;
+  const fontSizeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const updateSetting = (key: string, value: any) => {
-    // If font size is changing, trigger repagination
-    if (key === 'fontSize' && value !== settings.fontSize) {
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (fontSizeTimeoutRef.current) {
+        clearTimeout(fontSizeTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const updateFontSize = (value: number) => {
+    if (value !== settings.fontSize) {
       console.log('🔄 Font size changed, triggering repagination...', {
         oldSize: settings.fontSize,
         newSize: value
       });
       
-      // Update settings first
+      // Clear any pending font size updates
+      if (fontSizeTimeoutRef.current) {
+        clearTimeout(fontSizeTimeoutRef.current);
+      }
+      
+      // Update settings immediately for responsive UI
       dispatch({
         type: 'UPDATE_SETTINGS',
-        payload: { [key]: value },
-      });
-      
-      // Then repaginate all books with new font size
-      dispatch({
-        type: 'REPAGINATE_BOOKS',
         payload: { fontSize: value },
       });
+      
+      // Debounce repagination to avoid excessive calls
+      fontSizeTimeoutRef.current = setTimeout(() => {
+        console.log('🔄 Starting repagination with font size:', value);
+        dispatch({
+          type: 'REPAGINATE_BOOKS',
+          payload: { fontSize: value },
+        });
+      }, 200); // Increased delay to prevent interference
+    }
+  };
+
+  const updateSetting = (key: string, value: any) => {
+    // Handle font size separately to avoid interference
+    if (key === 'fontSize') {
+      updateFontSize(value);
     } else {
-      // Normal setting update
+      // Normal setting update for non-font settings
       dispatch({
         type: 'UPDATE_SETTINGS',
         payload: { [key]: value },
@@ -165,6 +189,7 @@ export default function SettingsScreen() {
           subtitle={`${settings.speechRate.toFixed(1)}x`}
         >
           <Slider
+            key="speechRate-slider"
             style={styles.slider}
             minimumValue={0.5}
             maximumValue={2.0}
@@ -181,6 +206,7 @@ export default function SettingsScreen() {
           subtitle={`${settings.speechPitch.toFixed(1)}`}
         >
           <Slider
+            key="speechPitch-slider"
             style={styles.slider}
             minimumValue={0.5}
             maximumValue={2.0}
@@ -232,6 +258,7 @@ export default function SettingsScreen() {
           subtitle={`${settings.fontSize}pt`}
         >
           <Slider
+            key="fontSize-slider"
             style={styles.slider}
             minimumValue={12}
             maximumValue={24}

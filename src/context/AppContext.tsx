@@ -82,10 +82,19 @@ function appReducer(state: AppState, action: AppAction): AppState {
         settings: { ...state.settings, ...action.payload },
       };
     case 'REPAGINATE_BOOKS':
+      console.log('📚 REPAGINATE_BOOKS action triggered with fontSize:', action.payload.fontSize);
       const repaginatedBooks = repaginateAllBooks(state.books, action.payload.fontSize);
       const repaginatedCurrentBook = state.currentBook 
         ? repaginatedBooks.find(book => book.id === state.currentBook!.id) || state.currentBook
         : state.currentBook;
+      
+      console.log('📚 Repagination complete:', {
+        totalBooks: repaginatedBooks.length,
+        currentBookUpdated: !!repaginatedCurrentBook && repaginatedCurrentBook.id === state.currentBook?.id,
+        currentBookPages: repaginatedCurrentBook?.totalPages,
+        currentBookCurrentPage: repaginatedCurrentBook?.currentPage
+      });
+      
       return {
         ...state,
         books: repaginatedBooks,

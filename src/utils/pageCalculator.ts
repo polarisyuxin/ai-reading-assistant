@@ -1,4 +1,4 @@
-import { Dimensions } from 'react-native';
+import { Dimensions, Platform } from 'react-native';
 import { detectPrimaryLanguage } from './textUtils';
 
 export interface PageCalculationParams {
@@ -46,8 +46,8 @@ export function calculateDynamicPageSize(
   // Detect language for character width estimation
   const language = detectPrimaryLanguage(content);
   
-  // Font metrics estimation based on fontSize
-  const lineHeight = params.fontSize * 1.75; // Line height is typically 1.75x font size
+  // Font metrics estimation based on fontSize (iOS needs different line height)
+  const lineHeight = Platform.OS === 'ios' ? params.fontSize * 1.6 : params.fontSize * 1.75;
   const charWidth = getCharacterWidth(params.fontSize, language);
   
   // Calculate layout
@@ -90,16 +90,16 @@ function getCharacterWidth(fontSize: number, language: 'english' | 'chinese' | '
   switch (language) {
     case 'chinese':
       // Chinese characters are typically wider and more square
-      baseRatio = 1.0; // Chinese chars are roughly 1:1 ratio with font size
+      baseRatio = Platform.OS === 'ios' ? 1.1 : 1.0;
       break;
     case 'mixed':
       // Mixed content, average between English and Chinese
-      baseRatio = 0.75;
+      baseRatio = Platform.OS === 'ios' ? 0.8 : 0.75;
       break;
     case 'english':
     default:
-      // English characters are typically narrower
-      baseRatio = 0.6; // English chars are roughly 0.6x font size in width
+      // English characters are typically narrower, iOS renders slightly wider
+      baseRatio = Platform.OS === 'ios' ? 0.65 : 0.6;
       break;
   }
   

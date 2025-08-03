@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   Modal,
   Alert,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Speech from 'expo-speech';
@@ -22,6 +23,7 @@ export default function ReaderScreen() {
   const [selectedText, setSelectedText] = useState('');
   const scrollViewRef = useRef<ScrollView>(null);
   const [lastBookId, setLastBookId] = useState<string | null>(null);
+  const [renderKey, setRenderKey] = useState(0);
 
   useEffect(() => {
     return () => {
@@ -37,14 +39,31 @@ export default function ReaderScreen() {
     }
   }, [currentBook?.id]);
 
-  // Debug settings changes
+  // Debug settings changes and force re-render on iOS
   useEffect(() => {
     console.log('🎨 Settings changed in Reader:', {
       fontSize: settings.fontSize,
       textColor: settings.textColor,
       backgroundColor: settings.backgroundColor
     });
+    
+    // Force re-render on iOS when font size changes
+    if (Platform.OS === 'ios') {
+      setRenderKey(prev => prev + 1);
+    }
   }, [settings.fontSize, settings.textColor, settings.backgroundColor]);
+
+  // Force re-render when current book changes (including repagination)
+  useEffect(() => {
+    if (currentBook) {
+      console.log('📖 Current book updated:', {
+        title: currentBook.title,
+        currentPage: currentBook.currentPage,
+        totalPages: currentBook.totalPages,
+        pagesLength: currentBook.pages?.length
+      });
+    }
+  }, [currentBook?.totalPages, currentBook?.currentPage]);
 
   const startReading = async () => {
     if (!currentBook || !currentBook.content) {
@@ -157,10 +176,10 @@ export default function ReaderScreen() {
 
   if (!currentBook) {
     return (
-      <View style={styles.emptyContainer}>
+      <View style={[styles.emptyContainer, { backgroundColor: settings.backgroundColor }]}>
         <Ionicons name="book-outline" size={80} color="#ccc" />
-        <Text style={styles.emptyText}>No book selected</Text>
-        <Text style={styles.emptySubtext}>
+        <Text style={[styles.emptyText, { color: settings.textColor }]}>No book selected</Text>
+        <Text style={[styles.emptySubtext, { color: settings.textColor, fontSize: settings.fontSize * 0.9 }]}>
           Go to Library to select a book to read
         </Text>
       </View>
@@ -185,15 +204,21 @@ export default function ReaderScreen() {
     
     if (!currentBook || !currentBook.content) {
       console.log('renderText: No book or content available');
+      const noContentStyle = Platform.select({
+        ios: {
+          color: settings.textColor, 
+          fontSize: settings.fontSize,
+          lineHeight: settings.fontSize * 1.6,
+          fontFamily: 'System',
+        },
+        default: {
+          color: settings.textColor, 
+          fontSize: settings.fontSize,
+          lineHeight: settings.fontSize * 1.75,
+        }
+      });
       return (
-        <Text style={[
-          styles.bookText, 
-          { 
-            color: settings.textColor, 
-            fontSize: settings.fontSize,
-            lineHeight: settings.fontSize * 1.75
-          }
-        ]}>
+        <Text style={[styles.bookText, noContentStyle]}>
           No content available
         </Text>
       );
@@ -202,15 +227,21 @@ export default function ReaderScreen() {
     const currentPage = getCurrentPage();
     if (!currentPage) {
       console.log('renderText: No current page available');
+      const noPageStyle = Platform.select({
+        ios: {
+          color: settings.textColor, 
+          fontSize: settings.fontSize,
+          lineHeight: settings.fontSize * 1.6,
+          fontFamily: 'System',
+        },
+        default: {
+          color: settings.textColor, 
+          fontSize: settings.fontSize,
+          lineHeight: settings.fontSize * 1.75,
+        }
+      });
       return (
-        <Text style={[
-          styles.bookText, 
-          { 
-            color: settings.textColor, 
-            fontSize: settings.fontSize,
-            lineHeight: settings.fontSize * 1.75
-          }
-        ]}>
+        <Text style={[styles.bookText, noPageStyle]}>
           No page content available
         </Text>
       );
@@ -223,14 +254,23 @@ export default function ReaderScreen() {
       textColor: settings.textColor
     });
     
-    const textStyle = {
-      color: settings.textColor, 
-      fontSize: settings.fontSize,
-      lineHeight: settings.fontSize * 1.75
-    };
+    // iOS-specific text styling
+    const textStyle = Platform.select({
+      ios: {
+        color: settings.textColor, 
+        fontSize: settings.fontSize,
+        lineHeight: Platform.OS === 'ios' ? settings.fontSize * 1.6 : settings.fontSize * 1.75,
+        fontFamily: Platform.OS === 'ios' ? 'System' : undefined,
+      },
+      default: {
+        color: settings.textColor, 
+        fontSize: settings.fontSize,
+        lineHeight: settings.fontSize * 1.75,
+      }
+    });
     
     return (
-      <View>
+      <View key={`text-${renderKey}`}>
         <Text style={[styles.bookText, textStyle]}>
           {currentPage.content}
         </Text>
@@ -271,9 +311,12 @@ export default function ReaderScreen() {
       </View>
 
       <ScrollView
+        key={`scroll-${settings.fontSize}-${renderKey}`}
         ref={scrollViewRef}
         style={styles.textContainer}
         contentContainerStyle={styles.textContent}
+        showsVerticalScrollIndicator={true}
+        scrollEventThrottle={16}
       >
         {renderText()}
       </ScrollView>

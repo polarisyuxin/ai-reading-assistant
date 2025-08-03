@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -17,7 +17,7 @@ import { useNavigation } from '@react-navigation/native';
 import { useAppContext } from '../context/AppContext';
 import AIAssistant from '../components/AIAssistant';
 import { detectPrimaryLanguage, countWords } from '../utils/textUtils';
-import { calculateElapsedTime, calculateRemainingTime, formatTime, calculateWordsPerMinute } from '../utils/timeUtils';
+import { calculateWordsPerMinute } from '../utils/timeUtils';
 
 export default function ReaderScreen() {
   const navigation = useNavigation();
@@ -27,14 +27,32 @@ export default function ReaderScreen() {
   const [selectedText, setSelectedText] = useState('');
   const [showChapterModal, setShowChapterModal] = useState(false);
   const [showSleepTimerModal, setShowSleepTimerModal] = useState(false);
-  const [sleepTimer, setSleepTimer] = useState<number | null>(null);
+  const [, setSleepTimer] = useState<number | null>(null);
   const [sleepTimerActive, setSleepTimerActive] = useState(false);
   const [remainingTime, setRemainingTime] = useState<number>(0);
   const [showSpeedModal, setShowSpeedModal] = useState(false);
   const [cachedWordCount, setCachedWordCount] = useState<number>(0);
   const flatListRef = useRef<FlatList>(null);
   const [lastBookId, setLastBookId] = useState<string | null>(null);
-  const [renderKey, setRenderKey] = useState(0);
+  const [, setRenderKey] = useState(0);
+  
+  // Track scroll position for TTS synchronization and current position state
+  const [currentScrollY, setCurrentScrollY] = useState(0);
+  const [estimatedItemHeight, setEstimatedItemHeight] = useState(100); // Dynamic height estimation
+  
+  // Loading and content state
+  const [isContentLoading, setIsContentLoading] = useState(false);
+  const [contentChunks, setContentChunks] = useState<ChunkItem[]>([]);
+  
+  const [progressBarWidth, setProgressBarWidth] = useState(300);
+  const [isDragging, setIsDragging] = useState(false);
+  const [, setTempPage] = useState(currentBook?.currentPage || 1);
+  const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Track content size for scroll-based progress
+  const [contentHeight, setContentHeight] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(0);
 
   useEffect(() => {
     return () => {
@@ -48,7 +66,7 @@ export default function ReaderScreen() {
       setLastBookId(currentBook.id);
       console.log('📚 New book selected');
     }
-  }, [currentBook?.id]);
+  }, [currentBook?.id, currentBook, lastBookId]);
 
   // Debug settings changes and force re-render on iOS
   useEffect(() => {
@@ -75,7 +93,7 @@ export default function ReaderScreen() {
       });
       setTempPage(currentBook.currentPage);
     }
-  }, [currentBook?.totalPages, currentBook?.currentPage]);
+  }, [currentBook?.totalPages, currentBook?.currentPage, currentBook]);
 
   // Cache word count when book changes for faster duration calculations
   useEffect(() => {
@@ -90,7 +108,7 @@ export default function ReaderScreen() {
     } else if (!currentBook?.content) {
       setCachedWordCount(0);
     }
-  }, [currentBook?.id, currentBook?.content, lastBookId]);
+  }, [currentBook?.id, currentBook?.content, currentBook?.title, lastBookId]);
 
   const startReading = async () => {
     if (!currentBook || !currentBook.content) {
@@ -189,18 +207,6 @@ export default function ReaderScreen() {
     );
   };
 
-  if (!currentBook) {
-    return (
-      <View style={[styles.emptyContainer, { backgroundColor: settings.backgroundColor }]}>
-        <Ionicons name="book-outline" size={80} color="#ccc" />
-        <Text style={[styles.emptyText, { color: settings.textColor }]}>No book selected</Text>
-        <Text style={[styles.emptySubtext, { color: settings.textColor, fontSize: settings.fontSize * 0.9 }]}>
-          Go to Library to select a book to read
-        </Text>
-      </View>
-    );
-  }
-
   const getCurrentPage = () => {
     if (!currentBook || !currentBook.pages || currentBook.pages.length === 0) {
       console.log('getCurrentPage: No book or pages available');
@@ -216,6 +222,14 @@ export default function ReaderScreen() {
 
   // Content chunking constants
   const CHUNK_SIZE = 2000; // Characters per chunk for optimal performance
+  
+  // Define chunk item type
+  interface ChunkItem {
+    id: string;
+    text: string;
+    startIndex: number;
+    endIndex: number;
+  }
   
   // Asynchronous content chunking to prevent UI blocking
   const chunkContentAsync = async (content: string): Promise<ChunkItem[]> => {
@@ -388,28 +402,13 @@ export default function ReaderScreen() {
   };
 
   const goToChapter = (chapterStartPage: number) => {
+    if (!currentBook) return;
     dispatch({
       type: 'UPDATE_CURRENT_PAGE',
       payload: { bookId: currentBook.id, page: chapterStartPage },
     });
     setShowChapterModal(false);
   };
-
-  // Track scroll position for TTS synchronization and current position state
-  const [currentScrollY, setCurrentScrollY] = useState(0);
-  const [estimatedItemHeight, setEstimatedItemHeight] = useState(100); // Dynamic height estimation
-  
-  // Loading and content state
-  const [isContentLoading, setIsContentLoading] = useState(false);
-  const [contentChunks, setContentChunks] = useState<ChunkItem[]>([]);
-  
-  // Define chunk item type
-  interface ChunkItem {
-    id: string;
-    text: string;
-    startIndex: number;
-    endIndex: number;
-  }
   
   const handleScroll = (event: any) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -431,12 +430,6 @@ export default function ReaderScreen() {
       }
     }
   };
-
-  const [progressBarWidth, setProgressBarWidth] = useState(300);
-  const [isDragging, setIsDragging] = useState(false);
-  const [tempPage, setTempPage] = useState(currentBook?.currentPage || 1);
-  const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const countdownRef = useRef<NodeJS.Timeout | null>(null);
 
   // Sleep timer functionality
   const setSleepTimerMinutes = (minutes: number) => {
@@ -514,73 +507,94 @@ export default function ReaderScreen() {
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
 
-  // Calculate words per minute based on speech rate
-  const getWordsPerMinute = (rate: number): number => {
-    return Math.round(200 * rate); // Base rate of 200 WPM at 1x speed
-  };
-
   // Get current words per minute for progress bar calculations
   const currentWPM = calculateWordsPerMinute(settings.speechRate);
 
-  // Fast time calculations using cached word count
-  const getElapsedTime = (): number => {
-    if (!currentBook || cachedWordCount === 0 || currentBook.totalPages === 0) return 0;
-    const progressRatio = (currentBook.currentPage - 1) / currentBook.totalPages;
-    const wordsRead = Math.round(cachedWordCount * progressRatio);
-    return Math.ceil(wordsRead / currentWPM); // Returns minutes
+  // Fast time calculations using cached word count with second-level accuracy
+  const getElapsedTimeInSeconds = (): number => {
+    if (!currentBook || cachedWordCount === 0 || contentHeight === 0 || containerHeight === 0) return 0;
+    
+    // Calculate progress based on scroll position for more accurate timing
+    const scrollProgress = contentHeight > containerHeight 
+      ? currentScrollY / (contentHeight - containerHeight) 
+      : 0;
+    
+    const wordsRead = cachedWordCount * Math.max(0, Math.min(1, scrollProgress));
+    const wordsPerSecond = currentWPM / 60; // Convert WPM to words per second
+    return Math.round(wordsRead / wordsPerSecond); // Returns seconds
   };
 
-  const getTotalTime = (): number => {
+  const getTotalTimeInSeconds = (): number => {
     if (!currentBook || cachedWordCount === 0) return 0;
-    return Math.ceil(cachedWordCount / currentWPM); // Returns total minutes for entire book
+    const wordsPerSecond = currentWPM / 60; // Convert WPM to words per second
+    return Math.round(cachedWordCount / wordsPerSecond); // Returns total seconds for entire book
+  };
+
+  // Format seconds into HH:MM:SS or MM:SS format
+  const formatTimeFromSeconds = (totalSeconds: number): string => {
+    if (!totalSeconds || isNaN(totalSeconds) || totalSeconds < 0) {
+      return '0:00';
+    }
+    
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = Math.floor(totalSeconds % 60);
+    
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    } else {
+      return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    }
   };
 
   // Debug: Log when speech rate changes
   useEffect(() => {
     console.log('📊 Speech rate changed:', settings.speechRate, 'WPM:', currentWPM);
     if (currentBook && cachedWordCount > 0) {
-      const elapsed = getElapsedTime();
-      const total = getTotalTime();
+      const elapsedSeconds = getElapsedTimeInSeconds();
+      const totalSeconds = getTotalTimeInSeconds();
       console.log('📊 Fast time calculations:', {
-        currentPage: currentBook.currentPage,
-        totalPages: currentBook.totalPages,
+        currentScrollY: currentScrollY,
+        contentHeight: contentHeight,
+        containerHeight: containerHeight,
         cachedWordCount: cachedWordCount,
-        progressRatio: currentBook.currentPage / currentBook.totalPages,
-        elapsed: elapsed,
-        total: total,
-        formattedElapsed: formatTime(elapsed),
-        formattedTotal: formatTime(total)
+        scrollProgress: contentHeight > containerHeight ? currentScrollY / (contentHeight - containerHeight) : 0,
+        elapsedSeconds: elapsedSeconds,
+        totalSeconds: totalSeconds,
+        formattedElapsed: formatTimeFromSeconds(elapsedSeconds),
+        formattedTotal: formatTimeFromSeconds(totalSeconds)
       });
     }
-  }, [settings.speechRate, currentWPM, currentBook?.currentPage, cachedWordCount]);
+  }, [settings.speechRate, currentWPM, currentScrollY, contentHeight, containerHeight, cachedWordCount, currentBook]);
 
-  // Calculate total reading duration for current book (using cached word count)
-  const getTotalDuration = (rate: number): string => {
-    if (!currentBook?.content || cachedWordCount === 0) return '~0:00';
+  // Calculate total reading duration for current book with second-level accuracy
+  const getTotalDurationInSeconds = (rate: number): number => {
+    if (!currentBook?.content || cachedWordCount === 0) return 0;
     
-    const wpm = getWordsPerMinute(rate);
-    if (wpm === 0) return '~0:00';
+    const wpm = calculateWordsPerMinute(rate);
+    if (wpm === 0) return 0;
     
-    const totalMinutes = Math.ceil(cachedWordCount / wpm);
-    
-    if (isNaN(totalMinutes) || totalMinutes === 0) {
+    const wordsPerSecond = wpm / 60; // Convert WPM to words per second
+    return Math.round(cachedWordCount / wordsPerSecond); // Returns total seconds
+  };
+
+  // Format duration with ~ prefix for display in speed modal
+  const formatDurationWithPrefix = (totalSeconds: number): string => {
+    if (!totalSeconds || isNaN(totalSeconds) || totalSeconds < 0) {
       return '~0:00';
     }
     
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = Math.floor(totalSeconds % 60);
     
     if (hours > 0) {
-      return `~${hours}:${minutes.toString().padStart(2, '0')}:00`;
+      return `~${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
     } else {
-      return `~${minutes}:00`;
+      return `~${minutes}:${seconds.toString().padStart(2, '0')}`;
     }
   };
 
-  // Track content size for scroll-based progress
-  const [contentHeight, setContentHeight] = useState(0);
-  const [containerHeight, setContainerHeight] = useState(0);
-  
   const calculateScrollFromPosition = (locationX: number) => {
     const percentage = Math.max(0, Math.min(1, locationX / progressBarWidth));
     const maxScroll = Math.max(0, contentHeight - containerHeight);
@@ -607,6 +621,18 @@ export default function ReaderScreen() {
       setIsDragging(false);
     },
   });
+
+  if (!currentBook) {
+    return (
+      <View style={[styles.emptyContainer, { backgroundColor: settings.backgroundColor }]}>
+        <Ionicons name="book-outline" size={80} color="#ccc" />
+        <Text style={[styles.emptyText, { color: settings.textColor }]}>No book selected</Text>
+        <Text style={[styles.emptySubtext, { color: settings.textColor, fontSize: settings.fontSize * 0.9 }]}>
+          Go to Library to select a book to read
+        </Text>
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.container, { backgroundColor: settings.backgroundColor }]}>
@@ -644,10 +670,10 @@ export default function ReaderScreen() {
           <View style={styles.timeProgressContainer} key={`time-${settings.speechRate}`}>
             <View style={styles.timeLabels}>
               <Text style={styles.timeText}>
-                {formatTime(getElapsedTime())}
+                {formatTimeFromSeconds(getElapsedTimeInSeconds())}
               </Text>
               <Text style={styles.timeText}>
-                {formatTime(getTotalTime())}
+                {formatTimeFromSeconds(getTotalTimeInSeconds())}
               </Text>
             </View>
             
@@ -814,7 +840,7 @@ export default function ReaderScreen() {
                 <Ionicons name="book-outline" size={48} color="#ccc" />
                 <Text style={styles.noChaptersText}>No chapters detected</Text>
                 <Text style={styles.noChaptersSubtext}>
-                  This book doesn't have recognizable chapter markers
+                  This book doesn&apos;t have recognizable chapter markers
                 </Text>
               </View>
             )}
@@ -886,7 +912,7 @@ export default function ReaderScreen() {
                settings.speechRate === 1.0 ? 'Normal' : 'Fast'}
             </Text>
             <Text style={styles.speedModalDuration}>
-              Duration: {getTotalDuration(settings.speechRate)}
+              Duration: {formatDurationWithPrefix(getTotalDurationInSeconds(settings.speechRate))}
             </Text>
             {cachedWordCount > 0 && (
               <Text style={styles.wordCountText}>
@@ -912,7 +938,7 @@ export default function ReaderScreen() {
               
               <View style={styles.currentSpeedDisplay}>
                 <Text style={styles.currentSpeedText}>{settings.speechRate.toFixed(1)}×</Text>
-                <Text style={styles.wpmText}>{getWordsPerMinute(settings.speechRate)} words per minute</Text>
+                <Text style={styles.wpmText}>{calculateWordsPerMinute(settings.speechRate)} words per minute</Text>
               </View>
               
               <TouchableOpacity 

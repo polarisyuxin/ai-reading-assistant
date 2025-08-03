@@ -21,7 +21,13 @@ export default function App() {
           }}
         >
           <Stack.Screen name="Library" component={LibraryScreen} />
-          <Stack.Screen name="Reader" component={ReaderScreen} />
+          <Stack.Screen 
+            name="Reader" 
+            component={ReaderScreen} 
+            options={{
+              gestureEnabled: false,
+            }}
+          />
           <Stack.Screen name="Settings" component={SettingsScreen} />
         </Stack.Navigator>
         <StatusBar style="auto" />

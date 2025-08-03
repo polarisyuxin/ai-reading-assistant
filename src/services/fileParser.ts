@@ -1,16 +1,18 @@
 import * as FileSystem from 'expo-file-system';
 import JSZip from 'jszip';
 import { Platform } from 'react-native';
-import { BookPage } from '../types';
+import { BookPage, Chapter } from '../types';
 import { segmentTextForPagination, detectPrimaryLanguage, countWords } from '../utils/textUtils';
 import { getResponsivePageSize } from '../utils/pageCalculator';
 import { readFileContent, isWebBlobUrl } from '../utils/webFileReader';
+import { detectChapters } from '../utils/chapterUtils';
 
 export interface ParsedBook {
   title: string;
   author?: string;
   content: string;
   pages: BookPage[];
+  chapters: Chapter[];
 }
 
 export class FileParser {
@@ -129,14 +131,17 @@ export class FileParser {
       
       const trimmedContent = content.trim();
       const pages = this.createPages(trimmedContent, fontSize);
+      const chapters = detectChapters(trimmedContent, pages);
       
       console.log('TXT pages created:', pages.length);
+      console.log('TXT chapters detected:', chapters.length);
       console.log('First page preview:', pages[0]?.content.substring(0, 100) + '...');
       
       return {
         title,
         content: trimmedContent,
         pages,
+        chapters,
       };
     } catch (error) {
       console.error('TXT parsing error:', error);
@@ -179,10 +184,13 @@ We apologize for this limitation and appreciate your understanding!`;
     
     const pages = this.createPages(content, fontSize);
     
+    const chapters = detectChapters(content, pages);
+    
     return {
       title: `${title} (PDF - Conversion Needed)`,
       content,
       pages,
+      chapters,
     };
   }
 
@@ -284,12 +292,14 @@ We apologize for this limitation and appreciate your understanding!`;
       
       const trimmedContent = content.trim();
       const pages = this.createPages(trimmedContent, fontSize);
+      const chapters = detectChapters(trimmedContent, pages);
       
       return {
         title,
         author,
         content: trimmedContent,
         pages,
+        chapters,
       };
       
     } catch (error) {

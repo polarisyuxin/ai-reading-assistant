@@ -46,6 +46,8 @@ export default function ReaderScreen() {
   
   const [progressBarWidth, setProgressBarWidth] = useState(300);
   const [isDragging, setIsDragging] = useState(false);
+  const [dragPosition, setDragPosition] = useState(0); // Track drag position as percentage (0-1)
+  const [isScrollingToPosition, setIsScrollingToPosition] = useState(false); // Track if we're scrolling to drag position
   const [, setTempPage] = useState(currentBook?.currentPage || 1);
   const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
@@ -387,6 +389,7 @@ export default function ReaderScreen() {
         showsVerticalScrollIndicator={true}
         scrollEventThrottle={16}
         onScroll={handleScroll}
+        onMomentumScrollEnd={handleScrollEnd}
         onContentSizeChange={(width, height) => setContentHeight(height)}
         onLayout={(event) => {
           const { height } = event.nativeEvent.layout;
@@ -413,7 +416,11 @@ export default function ReaderScreen() {
   const handleScroll = (event: any) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const scrollY = contentOffset.y;
-    setCurrentScrollY(scrollY);
+    
+    // Don't update scroll position if we're scrolling to a drag position
+    if (!isScrollingToPosition) {
+      setCurrentScrollY(scrollY);
+    }
     
     const scrollProgress = contentSize.height > layoutMeasurement.height 
       ? scrollY / (contentSize.height - layoutMeasurement.height) 
@@ -428,6 +435,21 @@ export default function ReaderScreen() {
           payload: { bookId: currentBook.id, page: estimatedPage },
         });
       }
+    }
+  };
+
+  const handleScrollEnd = (event: any) => {
+    if (isScrollingToPosition) {
+      const { contentOffset } = event.nativeEvent;
+      const scrollY = contentOffset.y;
+      
+      console.log('📜 Scroll animation completed at position:', scrollY);
+      
+      // Now update the actual scroll position and clear the scrolling state
+      setCurrentScrollY(scrollY);
+      setIsScrollingToPosition(false);
+      
+      console.log('✅ Slider can now update with actual scroll position');
     }
   };
 
@@ -512,14 +534,17 @@ export default function ReaderScreen() {
 
   // Fast time calculations using cached word count with second-level accuracy
   const getElapsedTimeInSeconds = (): number => {
-    if (!currentBook || cachedWordCount === 0 || contentHeight === 0 || containerHeight === 0) return 0;
+    if (!currentBook || cachedWordCount === 0) return 0;
     
-    // Calculate progress based on scroll position for more accurate timing
-    const scrollProgress = contentHeight > containerHeight 
-      ? currentScrollY / (contentHeight - containerHeight) 
-      : 0;
+    // Use drag position when dragging OR scrolling to position, otherwise use actual scroll position
+    let progressRatio = 0;
+    if (isDragging || isScrollingToPosition) {
+      progressRatio = dragPosition;
+    } else if (contentHeight > containerHeight) {
+      progressRatio = currentScrollY / (contentHeight - containerHeight);
+    }
     
-    const wordsRead = cachedWordCount * Math.max(0, Math.min(1, scrollProgress));
+    const wordsRead = cachedWordCount * Math.max(0, Math.min(1, progressRatio));
     const wordsPerSecond = currentWPM / 60; // Convert WPM to words per second
     return Math.round(wordsRead / wordsPerSecond); // Returns seconds
   };
@@ -565,7 +590,7 @@ export default function ReaderScreen() {
         formattedTotal: formatTimeFromSeconds(totalSeconds)
       });
     }
-  }, [settings.speechRate, currentWPM, currentScrollY, contentHeight, containerHeight, cachedWordCount, currentBook]);
+  }, [settings.speechRate, currentWPM, currentScrollY, contentHeight, containerHeight, cachedWordCount, currentBook, isDragging, dragPosition, isScrollingToPosition]);
 
   // Calculate total reading duration for current book with second-level accuracy
   const getTotalDurationInSeconds = (rate: number): number => {
@@ -595,10 +620,18 @@ export default function ReaderScreen() {
     }
   };
 
-  const calculateScrollFromPosition = (locationX: number) => {
-    const percentage = Math.max(0, Math.min(1, locationX / progressBarWidth));
+  const calculateProgressPercentage = (locationX: number): number => {
+    return Math.max(0, Math.min(1, locationX / progressBarWidth));
+  };
+
+  const calculateScrollFromPercentage = (percentage: number): number => {
     const maxScroll = Math.max(0, contentHeight - containerHeight);
     return percentage * maxScroll;
+  };
+
+  const getCurrentProgressPercentage = (): number => {
+    if (contentHeight <= containerHeight) return 0;
+    return currentScrollY / (contentHeight - containerHeight);
   };
 
   const panResponder = PanResponder.create({
@@ -606,19 +639,39 @@ export default function ReaderScreen() {
     onMoveShouldSetPanResponder: () => true,
     
     onPanResponderGrant: (event) => {
+      console.log('🎯 Progress bar drag started');
       setIsDragging(true);
+      // Set initial drag position based on current progress
+      setDragPosition(getCurrentProgressPercentage());
     },
     
     onPanResponderMove: (event) => {
       const { locationX } = event.nativeEvent;
-      const targetScroll = calculateScrollFromPosition(locationX);
-      if (flatListRef.current) {
-        flatListRef.current.scrollToOffset({ offset: targetScroll, animated: false });
-      }
+      const percentage = calculateProgressPercentage(locationX);
+      
+      // Update drag position immediately for visual feedback
+      setDragPosition(percentage);
+      
+      // Don't scroll content during drag - only update visual indicator
+      console.log('🎯 Drag position updated:', percentage);
     },
     
     onPanResponderRelease: (event) => {
+      console.log('🎯 Progress bar drag released at position:', dragPosition);
       setIsDragging(false);
+      
+      // Set scrolling state to prevent slider updates
+      setIsScrollingToPosition(true);
+      
+      // Now actually scroll to the target position
+      const targetScroll = calculateScrollFromPercentage(dragPosition);
+      if (flatListRef.current && targetScroll >= 0) {
+        console.log('📜 Scrolling to position:', targetScroll);
+        flatListRef.current.scrollToOffset({ 
+          offset: targetScroll, 
+          animated: true // Use smooth animation on release
+        });
+      }
     },
   });
 
@@ -690,9 +743,7 @@ export default function ReaderScreen() {
                   style={[
                     styles.progressFill, 
                     { 
-                      width: contentHeight > containerHeight 
-                        ? `${(currentScrollY / (contentHeight - containerHeight)) * 100}%`
-                        : '0%'
+                      width: `${(isDragging || isScrollingToPosition ? dragPosition : getCurrentProgressPercentage()) * 100}%`
                     }
                   ]} 
                 />
@@ -700,9 +751,7 @@ export default function ReaderScreen() {
                   style={[
                     styles.progressThumb,
                     { 
-                      left: contentHeight > containerHeight 
-                        ? `${(currentScrollY / (contentHeight - containerHeight)) * 100}%`
-                        : '0%'
+                      left: `${(isDragging || isScrollingToPosition ? dragPosition : getCurrentProgressPercentage()) * 100}%`
                     }
                   ]}
                 />

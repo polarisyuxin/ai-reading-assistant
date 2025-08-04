@@ -235,11 +235,10 @@ export default function ReaderScreen() {
       voice: settings.speechVoice,
       language: ttsLanguage,
       onDone: () => {
-        console.log('🎵 TTS finished reading all remaining content - setting to 100%');
+        console.log('🎵 TTS finished reading remaining content - preserving current progress');
         dispatch({ type: 'SET_PLAYING', payload: false });
         stopTtsProgressTracking();
-        // Only set to 100% when TTS naturally finishes reading all remaining content
-        setReadingProgress(1);
+        // NEVER change progress on TTS completion - it stays wherever TTS finished reading
       },
       onStopped: () => {
         console.log('🎵 TTS manually stopped - preserving current progress');
@@ -650,7 +649,6 @@ export default function ReaderScreen() {
       const elapsedSeconds = (Date.now() - ttsStartTimeRef.current) / 1000;
       const currentWpm = calculateWordsPerMinute(speechRate);
       const currentWordsPerSecond = currentWpm / 60;
-      const wordsReadSinceStart = elapsedSeconds * currentWordsPerSecond;
       
       // Edge case checks
       if (remainingWordCount <= 0) {
@@ -663,27 +661,19 @@ export default function ReaderScreen() {
         return;
       }
       
-      // Calculate progress through remaining text with safety checks
+      // Calculate progress increment based on words read since TTS started
+      const wordsReadSinceStart = elapsedSeconds * currentWordsPerSecond;
       const progressThroughRemainingText = Math.min(1, Math.max(0, wordsReadSinceStart / remainingWordCount));
       
-      // Calculate remaining progress range
+      // Calculate remaining progress range (how much progress is left to fill)
       const remainingProgressRange = Math.max(0, 1.0 - startProgress);
       
-      // Calculate new progress - ONLY move forward, never backward
+      // Calculate new progress - simple and consistent forward movement
       const progressIncrement = progressThroughRemainingText * remainingProgressRange;
       let newProgress = startProgress + progressIncrement;
       
-      // Ensure progress only moves forward and never exceeds reasonable bounds
-      // Math.max ensures we never go backward from current position
-      newProgress = Math.min(0.99, Math.max(lastTtsProgressRef.current, newProgress));
-      
-      // Conservative progress: use realistic reading speed limits
-      // Estimate words per second and convert to progress per second
-      const expectedProgressPerSecond = currentWordsPerSecond / remainingWordCount;
-      const maxAllowedProgress = lastTtsProgressRef.current + (elapsedSeconds * expectedProgressPerSecond);
-      
-      // Use the more conservative estimate
-      newProgress = Math.min(newProgress, maxAllowedProgress);
+      // Ensure progress ALWAYS moves forward (never goes backward) and caps at 100%
+      newProgress = Math.min(1.0, Math.max(lastTtsProgressRef.current, newProgress));
       
       // Only update if progress moved forward - NEVER allow backward movement
       if (newProgress > lastTtsProgressRef.current) {
@@ -698,7 +688,7 @@ export default function ReaderScreen() {
             increment: ((newProgress - oldProgress) * 100).toFixed(3) + '%'
           },
           readingPosition: {
-            estimatedWordsRead: wordsReadSinceStart.toFixed(1),
+            wordsReadSinceStart: wordsReadSinceStart.toFixed(1),
             remainingWords: remainingWordCount,
             completionOfRemaining: (progressThroughRemainingText * 100).toFixed(2) + '%'
           },
@@ -735,18 +725,22 @@ export default function ReaderScreen() {
       // Enhanced debug logging
       if (Math.floor(elapsedSeconds) % 2 === 0 && Math.floor(elapsedSeconds * 10) % 20 === 0) {
         console.log('🎯 TTS Progress Update:', {
-          elapsedSeconds: elapsedSeconds.toFixed(2),
-          wpm: currentWpm,
-          wordsPerSecond: currentWordsPerSecond.toFixed(2),
-          wordsReadSinceStart: wordsReadSinceStart.toFixed(1),
-          remainingWordCount: remainingWordCount,
-          progressThroughRemainingText: (progressThroughRemainingText * 100).toFixed(2) + '%',
-          remainingProgressRange: (remainingProgressRange * 100).toFixed(2) + '%',
-          progressIncrement: (progressIncrement * 100).toFixed(2) + '%',
-          startProgress: (startProgress * 100).toFixed(2) + '%',
-          newProgress: (newProgress * 100).toFixed(2) + '%',
-          lastTtsProgress: (lastTtsProgressRef.current * 100).toFixed(2) + '%',
-          stateReadingProgress: (readingProgress * 100).toFixed(2) + '%'
+          timing: {
+            elapsedSeconds: elapsedSeconds.toFixed(2),
+            wpm: currentWpm,
+            wordsPerSecond: currentWordsPerSecond.toFixed(2)
+          },
+          reading: {
+            wordsReadSinceStart: wordsReadSinceStart.toFixed(1),
+            remainingWords: remainingWordCount,
+            completionOfRemaining: (progressThroughRemainingText * 100).toFixed(2) + '%'
+          },
+          progress: {
+            startProgress: (startProgress * 100).toFixed(2) + '%',
+            currentProgress: (lastTtsProgressRef.current * 100).toFixed(2) + '%',
+            calculatedProgress: (newProgress * 100).toFixed(2) + '%',
+            progressIncrement: (progressIncrement * 100).toFixed(2) + '%'
+          }
         });
       }
       
@@ -917,7 +911,21 @@ export default function ReaderScreen() {
   const getElapsedTimeInSeconds = (): number => {
     if (!currentBook || cachedWordCount === 0) return 0;
     
-    // Use drag position when actively dragging, otherwise use reading progress
+    // When TTS is actively running, use actual elapsed time since TTS started
+    if (isPlaying && ttsStartTimeRef.current) {
+      const actualElapsedSeconds = Math.floor((Date.now() - ttsStartTimeRef.current) / 1000);
+      
+      // Calculate the base time from where TTS started reading
+      const startProgressRatio = ttsStartProgressRef.current;
+      const baseWordsRead = cachedWordCount * Math.max(0, Math.min(1, startProgressRatio));
+      const wordsPerSecond = currentWPM / 60;
+      const baseTimeSeconds = Math.round(baseWordsRead / wordsPerSecond);
+      
+      return baseTimeSeconds + actualElapsedSeconds;
+    }
+    
+    // When not playing TTS, calculate from current position
+    // Use drag position when actively dragging, otherwise use reading progress  
     const progressRatio = isDragging ? dragPosition : readingProgress;
     
     const wordsRead = cachedWordCount * Math.max(0, Math.min(1, progressRatio));

@@ -36,9 +36,18 @@ export default function ReaderScreen() {
   const [lastBookId, setLastBookId] = useState<string | null>(null);
   const [, setRenderKey] = useState(0);
   
-  // Track scroll position for TTS synchronization and current position state
+  // Track scroll position for UI purposes only
   const [currentScrollY, setCurrentScrollY] = useState(0);
   const [estimatedItemHeight, setEstimatedItemHeight] = useState(100); // Dynamic height estimation
+  
+  // Independent reading progress tracking (0-1, where 1 is completed)
+  const [readingProgress, setReadingProgress] = useState(0);
+  
+  // TTS progress tracking
+  const ttsStartTimeRef = useRef<number | null>(null);
+  const ttsStartProgressRef = useRef<number>(0);
+  const ttsProgressRef = useRef<NodeJS.Timeout | null>(null);
+  const lastTtsProgressRef = useRef<number>(0);
   
   // Loading and content state
   const [isContentLoading, setIsContentLoading] = useState(false);
@@ -47,8 +56,7 @@ export default function ReaderScreen() {
   const [progressBarWidth, setProgressBarWidth] = useState(300);
   const [isDragging, setIsDragging] = useState(false);
   const [dragPosition, setDragPosition] = useState(0); // Track drag position as percentage (0-1)
-  const [isScrollingToPosition, setIsScrollingToPosition] = useState(false); // Track if we're scrolling to drag position
-  const [dragStartOffset, setDragStartOffset] = useState(0); // Track initial touch offset from thumb center
+  const [isScrollingToPosition, setIsScrollingToPosition] = useState(false); // Track if we're animating scroll from progress bar drag
   const [, setTempPage] = useState(currentBook?.currentPage || 1);
   const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
@@ -60,6 +68,7 @@ export default function ReaderScreen() {
   useEffect(() => {
     return () => {
       Speech.stop();
+      stopTtsProgressTracking();
     };
   }, []);
 
@@ -95,6 +104,33 @@ export default function ReaderScreen() {
         pagesLength: currentBook.pages?.length
       });
       setTempPage(currentBook.currentPage);
+      
+      // Initialize reading progress based on character position (character-based positioning)
+      if (currentBook.totalLength > 0 && currentBook.currentPosition >= 0) {
+        const progress = currentBook.currentPosition / currentBook.totalLength;
+        const clampedProgress = Math.max(0, Math.min(1, progress));
+        setReadingProgress(clampedProgress);
+        
+        console.log('📚 BOOK CHANGED - INITIALIZING CHARACTER-BASED PROGRESS:', {
+          book: {
+            title: currentBook.title,
+            currentPosition: currentBook.currentPosition,
+            totalLength: currentBook.totalLength,
+            currentPage: currentBook.currentPage,
+            totalPages: currentBook.totalPages
+          },
+          progressBar: {
+            characterBasedPercentage: (progress * 100).toFixed(2) + '%',
+            clampedPercentage: (clampedProgress * 100).toFixed(2) + '%'
+          },
+          readingPosition: {
+            characterIndex: currentBook.currentPosition,
+            estimatedWordsRead: Math.floor(clampedProgress * cachedWordCount),
+            totalCharacters: currentBook.totalLength,
+            totalWords: cachedWordCount
+          }
+        });
+      }
     }
   }, [currentBook?.totalPages, currentBook?.currentPage, currentBook]);
 
@@ -119,13 +155,25 @@ export default function ReaderScreen() {
       return;
     }
 
-    // For scroll-based reading, we'll read the entire content or from current scroll position
-    const textToRead = currentBook.content;
+    // Calculate starting position based on current reading progress
+    const fullContent = currentBook.content;
+    const startCharIndex = Math.floor(readingProgress * fullContent.length);
+    
+    // Read from current progress position to the end
+    const textToRead = fullContent.substring(startCharIndex);
     
     if (!textToRead.trim()) {
-      Alert.alert('Error', 'No text content found on this page');
+      Alert.alert('Info', 'You have already completed reading this book');
       return;
     }
+    
+    console.log('🎯 TTS starting from progress:', {
+      readingProgress: readingProgress,
+      startCharIndex: startCharIndex,
+      remainingLength: textToRead.length,
+      totalLength: fullContent.length,
+      textPreview: textToRead.substring(0, 100) + '...'
+    });
     
     // Auto-detect language for better TTS if not manually set
     const detectedLanguage = detectPrimaryLanguage(textToRead);
@@ -137,32 +185,89 @@ export default function ReaderScreen() {
       console.log('🎵 Auto-detected Chinese text, switching TTS to Chinese');
     }
     
+    // Calculate word count for the remaining text to be read
+    const remainingWordStats = countWords(textToRead);
+    const remainingWordCount = remainingWordStats.words || 0;
+    
+    // Safety check for minimum content
+    if (remainingWordCount < 5) {
+      Alert.alert('Info', 'Very little content remaining to read. You may be near the end of the book.');
+      console.warn('⚠️ TTS: Very few words remaining:', remainingWordCount);
+    }
+    
     console.log('🔊 Starting TTS with language:', ttsLanguage, 'for text:', textToRead.substring(0, 50) + '...');
+    console.log('📊 TTS word count:', {
+      remainingWords: remainingWordCount,
+      totalWords: cachedWordCount,
+      progressStart: readingProgress,
+      percentageComplete: (readingProgress * 100).toFixed(1) + '%',
+      textLength: textToRead.length
+    });
     
     dispatch({ type: 'SET_PLAYING', payload: true });
+    
+    // Start TTS progress tracking with remaining word count
+    console.log('🎬 Starting TTS playback and progress tracking');
+    console.log('📍 READING POSITION vs PROGRESS LOCATION:', {
+      readingPosition: {
+        startCharacterIndex: startCharIndex,
+        totalCharacters: fullContent.length,
+        remainingCharacters: textToRead.length,
+        percentageIntoBook: ((startCharIndex / fullContent.length) * 100).toFixed(2) + '%'
+      },
+      progressLocation: {
+        progressBarPercentage: (readingProgress * 100).toFixed(2) + '%',
+        currentPage: currentBook.currentPage,
+        totalPages: currentBook.totalPages
+      },
+      ttsContent: {
+        remainingWords: remainingWordCount,
+        totalWords: cachedWordCount,
+        textPreview: textToRead.substring(0, 100) + '...'
+      }
+    });
+    
+    startTtsProgressTracking(remainingWordCount);
+    logCompleteState('TTS STARTED');
 
     Speech.speak(textToRead, {
       rate: settings.speechRate,
       voice: settings.speechVoice,
       language: ttsLanguage,
       onDone: () => {
+        console.log('🎵 TTS finished reading all remaining content - setting to 100%');
         dispatch({ type: 'SET_PLAYING', payload: false });
-        // TTS is done reading the entire content
+        stopTtsProgressTracking();
+        // Only set to 100% when TTS naturally finishes reading all remaining content
+        setReadingProgress(1);
       },
       onStopped: () => {
+        console.log('🎵 TTS manually stopped - preserving current progress');
         dispatch({ type: 'SET_PLAYING', payload: false });
+        stopTtsProgressTracking();
+        // NEVER change progress on manual stop - it stays wherever TTS was paused
       },
       onError: (error) => {
         console.error('TTS Error:', error);
         dispatch({ type: 'SET_PLAYING', payload: false });
+        stopTtsProgressTracking();
         Alert.alert('Speech Error', 'Text-to-speech failed. Try adjusting the language setting.');
       },
     });
   };
 
   const stopReading = () => {
+    console.log('⏸️ Stopping TTS - current progress:', (readingProgress * 100).toFixed(2) + '%');
+    
+    // Stop TTS tracking FIRST to prevent any final calculations
+    stopTtsProgressTracking();
+    
+    // Then stop the speech
     Speech.stop();
     dispatch({ type: 'SET_PLAYING', payload: false });
+    
+    console.log('⏸️ TTS stopped - final progress:', (readingProgress * 100).toFixed(2) + '%');
+    logCompleteState('TTS PAUSED/STOPPED');
   };
 
   const handleTextSelection = (text: string) => {
@@ -407,50 +512,320 @@ export default function ReaderScreen() {
 
   const goToChapter = (chapterStartPage: number) => {
     if (!currentBook) return;
+    
+    // Find the chapter by startPage
+    const selectedChapter = currentBook.chapters.find(chapter => chapter.startPage === chapterStartPage);
+    if (!selectedChapter) {
+      console.warn('Chapter not found for page:', chapterStartPage);
+      return;
+    }
+    
     dispatch({
       type: 'UPDATE_CURRENT_PAGE',
       payload: { bookId: currentBook.id, page: chapterStartPage },
     });
+    
+    // DIRECT POSITION SET: Jump immediately to chapter position using character-based positioning
+    if (currentBook.totalLength > 0 && selectedChapter.startPosition >= 0) {
+      const progress = Math.max(0, Math.min(1, selectedChapter.startPosition / currentBook.totalLength));
+      setReadingProgress(progress);
+      lastTtsProgressRef.current = progress; // Update ref to match - no interpolation
+      
+      // Update current position in the book to match chapter start
+      dispatch({
+        type: 'UPDATE_READING_POSITION',
+        payload: { bookId: currentBook.id, position: selectedChapter.startPosition }
+      });
+      
+      console.log('📖 CHAPTER NAVIGATION: DIRECT POSITION SET (CHARACTER-BASED):', {
+        action: 'User selected chapter',
+        chapterTitle: selectedChapter.title,
+        chapterStartPosition: selectedChapter.startPosition,
+        chapterStartPage: chapterStartPage,
+        selectedPosition: (progress * 100).toFixed(2) + '%',
+        behavior: 'Jump directly - no interpolation'
+      });
+    }
+    
     setShowChapterModal(false);
   };
   
-  const handleScroll = (event: any) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const scrollY = contentOffset.y;
+  // Function to advance reading progress (manual controls only - stops TTS first) - CHARACTER-BASED
+  const advanceReadingProgress = (progressIncrement: number) => {
+    if (!currentBook) return;
     
-    // Don't update scroll position if we're scrolling to a drag position
-    if (!isScrollingToPosition) {
-      setCurrentScrollY(scrollY);
+    console.log('📍 SKIP BUTTON: DIRECT POSITION SET (CHARACTER-BASED):', {
+      action: progressIncrement > 0 ? 'Skip forward button' : 'Skip backward button',
+      increment: (progressIncrement * 100).toFixed(2) + '%',
+      fromPosition: (readingProgress * 100).toFixed(2) + '%',
+      toPosition: ((readingProgress + progressIncrement) * 100).toFixed(2) + '%',
+      behavior: 'Jump directly - no interpolation',
+      wasTtsActive: !!ttsProgressRef.current
+    });
+    
+    // Manual progress change should stop TTS and take control
+    if (ttsProgressRef.current) {
+      console.log('🛑 Manual control - stopping TTS first');
+      stopTtsProgressTracking();
     }
     
-    const scrollProgress = contentSize.height > layoutMeasurement.height 
-      ? scrollY / (contentSize.height - layoutMeasurement.height) 
-      : 0;
+    // DIRECT POSITION SET: Jump immediately to calculated position using character-based positioning
+    const newProgress = Math.max(0, Math.min(1, readingProgress + progressIncrement));
+    const newCharacterPosition = Math.floor(newProgress * currentBook.totalLength);
     
-    // Update current page based on scroll position for TTS and progress tracking
-    if (currentBook && currentBook.totalPages > 0) {
-      const estimatedPage = Math.max(1, Math.min(currentBook.totalPages, Math.ceil(scrollProgress * currentBook.totalPages)));
-      if (estimatedPage !== currentBook.currentPage) {
+    setReadingProgress(newProgress);
+    lastTtsProgressRef.current = newProgress; // Update ref to match - no interpolation
+    
+    // Update current position in the book to match the new progress
+    dispatch({
+      type: 'UPDATE_READING_POSITION',
+      payload: { bookId: currentBook.id, position: newCharacterPosition }
+    });
+    
+    logCompleteState('MANUAL CONTROL COMPLETED');
+    
+    // Update current page based on new character position
+    if (currentBook.pages && currentBook.pages.length > 0) {
+      const targetPage = currentBook.pages.find(page => 
+        newCharacterPosition >= page.startPosition && newCharacterPosition <= page.endPosition
+      );
+      if (targetPage) {
         dispatch({
           type: 'UPDATE_CURRENT_PAGE',
-          payload: { bookId: currentBook.id, page: estimatedPage },
+          payload: { bookId: currentBook.id, page: targetPage.pageNumber },
         });
       }
     }
   };
+  
+  // Function to set reading progress to a specific value
+  const setReadingProgressToPage = (page: number) => {
+    if (!currentBook || currentBook.totalPages === 0) return;
+    
+    const progress = (page - 1) / currentBook.totalPages;
+    setReadingProgress(Math.max(0, Math.min(1, progress)));
+    
+    dispatch({
+      type: 'UPDATE_CURRENT_PAGE',
+      payload: { bookId: currentBook.id, page },
+    });
+  };
+  
+  // Start TTS progress tracking
+  const startTtsProgressTracking = (remainingWordCount: number) => {
+    if (!currentBook || cachedWordCount === 0) return;
+    
+    // Record when TTS started and from what progress point (user-selected or current)
+    ttsStartTimeRef.current = Date.now();
+    ttsStartProgressRef.current = readingProgress; // Use EXACT current position
+    lastTtsProgressRef.current = readingProgress; // No modification or calculation
+    
+    console.log('🎯 TTS progress tracking started:', {
+      startProgress: readingProgress,
+      totalWordCount: cachedWordCount,
+      remainingWordCount: remainingWordCount,
+      speechRate: settings.speechRate,
+      estimatedWPM: calculateWordsPerMinute(settings.speechRate)
+    });
+    
+    // Clear any existing interval
+    if (ttsProgressRef.current) {
+      clearInterval(ttsProgressRef.current);
+    }
+    
+    // Store current values to avoid closure issues
+    const speechRate = settings.speechRate;
+    const book = currentBook;
+    const startProgress = ttsStartProgressRef.current;
+    
+    // Update progress every 100ms based on estimated reading speed
+    // IMPORTANT: Progress ONLY moves forward, never backward
+    ttsProgressRef.current = setInterval(() => {
+      // Double-check that tracking is still active
+      if (!ttsStartTimeRef.current || !ttsProgressRef.current) {
+        console.log('🛑 TTS interval fired but tracking was stopped - exiting');
+        return;
+      }
+      
+      const elapsedSeconds = (Date.now() - ttsStartTimeRef.current) / 1000;
+      const currentWpm = calculateWordsPerMinute(speechRate);
+      const currentWordsPerSecond = currentWpm / 60;
+      const wordsReadSinceStart = elapsedSeconds * currentWordsPerSecond;
+      
+      // Edge case checks
+      if (remainingWordCount <= 0) {
+        console.warn('⚠️ TTS: No remaining words to read, stopping tracking');
+        return;
+      }
+      
+      if (startProgress >= 1.0) {
+        console.warn('⚠️ TTS: Already at 100%, stopping tracking');
+        return;
+      }
+      
+      // Calculate progress through remaining text with safety checks
+      const progressThroughRemainingText = Math.min(1, Math.max(0, wordsReadSinceStart / remainingWordCount));
+      
+      // Calculate remaining progress range
+      const remainingProgressRange = Math.max(0, 1.0 - startProgress);
+      
+      // Calculate new progress - ONLY move forward, never backward
+      const progressIncrement = progressThroughRemainingText * remainingProgressRange;
+      let newProgress = startProgress + progressIncrement;
+      
+      // Ensure progress only moves forward and never exceeds reasonable bounds
+      // Math.max ensures we never go backward from current position
+      newProgress = Math.min(0.99, Math.max(lastTtsProgressRef.current, newProgress));
+      
+      // Conservative progress: use realistic reading speed limits
+      // Estimate words per second and convert to progress per second
+      const expectedProgressPerSecond = currentWordsPerSecond / remainingWordCount;
+      const maxAllowedProgress = lastTtsProgressRef.current + (elapsedSeconds * expectedProgressPerSecond);
+      
+      // Use the more conservative estimate
+      newProgress = Math.min(newProgress, maxAllowedProgress);
+      
+      // Only update if progress moved forward - NEVER allow backward movement
+      if (newProgress > lastTtsProgressRef.current) {
+        const oldProgress = lastTtsProgressRef.current;
+        lastTtsProgressRef.current = newProgress;
+        setReadingProgress(newProgress);
+        
+        console.log('📈 PROGRESS FORWARD:', {
+          progressBar: {
+            from: (oldProgress * 100).toFixed(2) + '%',
+            to: (newProgress * 100).toFixed(2) + '%',
+            increment: ((newProgress - oldProgress) * 100).toFixed(3) + '%'
+          },
+          readingPosition: {
+            estimatedWordsRead: wordsReadSinceStart.toFixed(1),
+            remainingWords: remainingWordCount,
+            completionOfRemaining: (progressThroughRemainingText * 100).toFixed(2) + '%'
+          },
+          timing: {
+            elapsed: elapsedSeconds.toFixed(1) + 's',
+            speechRate: speechRate + 'x',
+            wpm: currentWpm
+          }
+        });
+      } else if (newProgress < lastTtsProgressRef.current) {
+        // Log when progress would go backward (for debugging)
+        console.warn('⚠️ PROGRESS BLOCKED (would go backward):', {
+          currentProgress: (lastTtsProgressRef.current * 100).toFixed(2) + '%',
+          calculatedProgress: (newProgress * 100).toFixed(2) + '%',
+          difference: ((newProgress - lastTtsProgressRef.current) * 100).toFixed(3) + '%',
+          debugInfo: {
+            elapsedSeconds: elapsedSeconds.toFixed(2),
+            wordsReadSinceStart: wordsReadSinceStart.toFixed(1),
+            progressThroughRemainingText: (progressThroughRemainingText * 100).toFixed(2) + '%',
+            remainingProgressRange: (remainingProgressRange * 100).toFixed(2) + '%',
+            startProgress: (startProgress * 100).toFixed(2) + '%'
+          },
+          reason: 'Progress never goes backward - calculation error or race condition'
+        });
+      } else {
+        // Log when progress stays the same (no movement)
+        console.log('📊 PROGRESS UNCHANGED:', {
+          currentProgress: (lastTtsProgressRef.current * 100).toFixed(2) + '%',
+          calculatedProgress: (newProgress * 100).toFixed(2) + '%',
+          elapsed: elapsedSeconds.toFixed(1) + 's'
+        });
+      }
+      
+      // Enhanced debug logging
+      if (Math.floor(elapsedSeconds) % 2 === 0 && Math.floor(elapsedSeconds * 10) % 20 === 0) {
+        console.log('🎯 TTS Progress Update:', {
+          elapsedSeconds: elapsedSeconds.toFixed(2),
+          wpm: currentWpm,
+          wordsPerSecond: currentWordsPerSecond.toFixed(2),
+          wordsReadSinceStart: wordsReadSinceStart.toFixed(1),
+          remainingWordCount: remainingWordCount,
+          progressThroughRemainingText: (progressThroughRemainingText * 100).toFixed(2) + '%',
+          remainingProgressRange: (remainingProgressRange * 100).toFixed(2) + '%',
+          progressIncrement: (progressIncrement * 100).toFixed(2) + '%',
+          startProgress: (startProgress * 100).toFixed(2) + '%',
+          newProgress: (newProgress * 100).toFixed(2) + '%',
+          lastTtsProgress: (lastTtsProgressRef.current * 100).toFixed(2) + '%',
+          stateReadingProgress: (readingProgress * 100).toFixed(2) + '%'
+        });
+      }
+      
+      // Update current page and position based on TTS progress using CHARACTER-BASED positioning
+      if (book && book.totalLength > 0) {
+        const newCharacterPosition = Math.floor(newProgress * book.totalLength);
+        
+        // Update character position in the book
+        dispatch({
+          type: 'UPDATE_READING_POSITION',
+          payload: { bookId: book.id, position: newCharacterPosition }
+        });
+        
+        // Update current page based on character position
+        if (book.pages && book.pages.length > 0) {
+          const targetPage = book.pages.find(page => 
+            newCharacterPosition >= page.startPosition && newCharacterPosition <= page.endPosition
+          );
+          if (targetPage) {
+            dispatch({
+              type: 'UPDATE_CURRENT_PAGE',
+              payload: { bookId: book.id, page: targetPage.pageNumber },
+            });
+          }
+        }
+      }
+    }, 100); // Update every 100ms for smooth progress bar movement
+  };
+  
+  // Stop TTS progress tracking
+  const stopTtsProgressTracking = () => {
+    const currentProgress = lastTtsProgressRef.current;
+    console.log('🛑 Stopping TTS progress tracking - preserving progress at:', (currentProgress * 100).toFixed(2) + '%');
+    
+    // Clear interval FIRST to prevent any more updates
+    if (ttsProgressRef.current) {
+      clearInterval(ttsProgressRef.current);
+      ttsProgressRef.current = null;
+      console.log('🛑 TTS progress interval cleared');
+    }
+    
+    // Clear tracking timestamps but preserve progress state
+    ttsStartTimeRef.current = null;
+    
+    // DIRECT POSITION PRESERVATION: Keep progress exactly where TTS stopped
+    setReadingProgress(currentProgress); // No calculation, no interpolation
+    
+    console.log('🛑 TTS STOPPED - FINAL POSITIONS:', {
+      progressBar: {
+        finalPercentage: (currentProgress * 100).toFixed(2) + '%',
+        preservedAt: 'pause position'
+      },
+      readingPosition: {
+        estimatedCharacterPosition: Math.floor(currentProgress * (currentBook?.content?.length || 0)),
+        estimatedWordsRead: Math.floor(currentProgress * cachedWordCount),
+        remainingWords: Math.floor((1 - currentProgress) * cachedWordCount)
+      }
+    });
+  };
+  
+  const handleScroll = (event: any) => {
+    const { contentOffset } = event.nativeEvent;
+    const scrollY = contentOffset.y;
+    
+    // Update scroll position for UI purposes only - not connected to reading progress
+    setCurrentScrollY(scrollY);
+    
+    // Note: Reading progress is now independent of scroll position
+    // Progress tracking is handled separately through user interactions or TTS
+  };
 
   const handleScrollEnd = (event: any) => {
     if (isScrollingToPosition) {
-      const { contentOffset } = event.nativeEvent;
-      const scrollY = contentOffset.y;
+      console.log('📜 Progress bar drag scroll animation completed');
       
-      console.log('📜 Scroll animation completed at position:', scrollY);
-      
-      // Now update the actual scroll position and clear the scrolling state
-      setCurrentScrollY(scrollY);
+      // Clear the scrolling-to-position state to allow normal progress bar tracking
       setIsScrollingToPosition(false);
       
-      console.log('✅ Slider can now update with actual scroll position');
+      console.log('✅ Progress bar can now track scroll position normally');
     }
   };
 
@@ -475,6 +850,7 @@ export default function ReaderScreen() {
         if (prev <= 1) {
           // Timer finished
           clearInterval(countdownRef.current!);
+          console.log('💤 Sleep timer triggered - stopping TTS');
           stopReading();
           setSleepTimerActive(false);
           setSleepTimer(null);
@@ -491,6 +867,7 @@ export default function ReaderScreen() {
       if (countdownRef.current) {
         clearInterval(countdownRef.current);
       }
+      console.log('💤 Sleep timer backup triggered - stopping TTS');
       stopReading();
       setSleepTimerActive(false);
       setSleepTimer(null);
@@ -520,6 +897,9 @@ export default function ReaderScreen() {
       if (countdownRef.current) {
         clearInterval(countdownRef.current);
       }
+      if (ttsProgressRef.current) {
+        clearInterval(ttsProgressRef.current);
+      }
     };
   }, []);
 
@@ -537,13 +917,8 @@ export default function ReaderScreen() {
   const getElapsedTimeInSeconds = (): number => {
     if (!currentBook || cachedWordCount === 0) return 0;
     
-    // Use drag position when dragging OR scrolling to position, otherwise use actual scroll position
-    let progressRatio = 0;
-    if (isDragging || isScrollingToPosition) {
-      progressRatio = dragPosition;
-    } else if (contentHeight > containerHeight) {
-      progressRatio = currentScrollY / (contentHeight - containerHeight);
-    }
+    // Use drag position when actively dragging, otherwise use reading progress
+    const progressRatio = isDragging ? dragPosition : readingProgress;
     
     const wordsRead = cachedWordCount * Math.max(0, Math.min(1, progressRatio));
     const wordsPerSecond = currentWPM / 60; // Convert WPM to words per second
@@ -573,25 +948,22 @@ export default function ReaderScreen() {
     }
   };
 
-  // Debug: Log when speech rate changes
+  // Debug: Log when speech rate or reading progress changes
   useEffect(() => {
     console.log('📊 Speech rate changed:', settings.speechRate, 'WPM:', currentWPM);
     if (currentBook && cachedWordCount > 0) {
       const elapsedSeconds = getElapsedTimeInSeconds();
       const totalSeconds = getTotalTimeInSeconds();
       console.log('📊 Fast time calculations:', {
-        currentScrollY: currentScrollY,
-        contentHeight: contentHeight,
-        containerHeight: containerHeight,
+        readingProgress: readingProgress,
         cachedWordCount: cachedWordCount,
-        scrollProgress: contentHeight > containerHeight ? currentScrollY / (contentHeight - containerHeight) : 0,
         elapsedSeconds: elapsedSeconds,
         totalSeconds: totalSeconds,
         formattedElapsed: formatTimeFromSeconds(elapsedSeconds),
         formattedTotal: formatTimeFromSeconds(totalSeconds)
       });
     }
-  }, [settings.speechRate, currentWPM, currentScrollY, contentHeight, containerHeight, cachedWordCount, currentBook, isDragging, dragPosition, isScrollingToPosition]);
+  }, [settings.speechRate, currentWPM, readingProgress, cachedWordCount, currentBook, isDragging, dragPosition]);
 
   // Calculate total reading duration for current book with second-level accuracy
   const getTotalDurationInSeconds = (rate: number): number => {
@@ -621,9 +993,6 @@ export default function ReaderScreen() {
     }
   };
 
-  const calculateProgressPercentage = (locationX: number): number => {
-    return Math.max(0, Math.min(1, locationX / progressBarWidth));
-  };
 
   const calculateScrollFromPercentage = (percentage: number): number => {
     const maxScroll = Math.max(0, contentHeight - containerHeight);
@@ -631,8 +1000,39 @@ export default function ReaderScreen() {
   };
 
   const getCurrentProgressPercentage = (): number => {
-    if (contentHeight <= containerHeight) return 0;
-    return currentScrollY / (contentHeight - containerHeight);
+    // Return reading progress (independent of scroll position)
+    return readingProgress;
+  };
+  
+  // Helper function to log complete state for debugging
+  const logCompleteState = (context: string) => {
+    if (!currentBook) return;
+    
+    console.log(`🔍 COMPLETE STATE - ${context}:`, {
+      progressBar: {
+        displayedPercentage: (readingProgress * 100).toFixed(2) + '%',
+        lastTtsProgress: (lastTtsProgressRef.current * 100).toFixed(2) + '%',
+        isDragging: isDragging,
+        dragPosition: isDragging ? (dragPosition * 100).toFixed(2) + '%' : 'N/A'
+      },
+      readingPosition: {
+        currentCharacterIndex: Math.floor(readingProgress * (currentBook.content?.length || 0)),
+        totalCharacters: currentBook.content?.length || 0,
+        currentWordIndex: Math.floor(readingProgress * cachedWordCount),
+        totalWords: cachedWordCount,
+        percentageRead: (readingProgress * 100).toFixed(2) + '%'
+      },
+      bookState: {
+        currentPage: currentBook.currentPage,
+        totalPages: currentBook.totalPages,
+        title: currentBook.title
+      },
+      ttsState: {
+        isPlaying: isPlaying,
+        hasActiveTracking: !!ttsProgressRef.current,
+        startTime: ttsStartTimeRef.current ? new Date(ttsStartTimeRef.current).toLocaleTimeString() : 'N/A'
+      }
+    });
   };
 
   const panResponder = PanResponder.create({
@@ -641,6 +1041,12 @@ export default function ReaderScreen() {
     
     onPanResponderGrant: (event) => {
       console.log('🎯 Progress bar drag started');
+      
+      // Stop TTS if it's playing when user starts dragging
+      if (isPlaying) {
+        stopReading();
+      }
+      
       setIsDragging(true);
       
       const { locationX } = event.nativeEvent;
@@ -651,7 +1057,6 @@ export default function ReaderScreen() {
       
       // Set drag position to follow finger immediately - no offset needed for smooth tracking
       setDragPosition(initialPercentage);
-      setDragStartOffset(0); // Reset offset since we're doing direct tracking
       
       console.log('🎯 Drag started - Touch at:', locationX, 'Width:', progressBarWidth, 'Initial percentage:', initialPercentage.toFixed(3));
     },
@@ -673,18 +1078,53 @@ export default function ReaderScreen() {
     onPanResponderRelease: (event) => {
       console.log('🎯 Progress bar drag released at position:', dragPosition);
       setIsDragging(false);
-      setDragStartOffset(0); // Reset offset
       
-      // Set scrolling state to prevent slider updates
-      setIsScrollingToPosition(true);
+      // DIRECT POSITION SET: Jump immediately to user-selected position using CHARACTER-BASED positioning
+      if (!currentBook) return;
       
-      // Now actually scroll to the target position
+      const newCharacterPosition = Math.floor(dragPosition * currentBook.totalLength);
+      
+      console.log('🎯 PROGRESS BAR: DIRECT POSITION SET (CHARACTER-BASED):', {
+        action: 'User clicked/dragged to position',
+        selectedPosition: (dragPosition * 100).toFixed(2) + '%',
+        previousPosition: (readingProgress * 100).toFixed(2) + '%',
+        newCharacterPosition: newCharacterPosition,
+        totalLength: currentBook.totalLength,
+        behavior: 'Jump directly - no interpolation'
+      });
+      
+      // Set progress to EXACTLY where user clicked/dragged
+      setReadingProgress(dragPosition);
+      lastTtsProgressRef.current = dragPosition; // Update ref to match
+      
+      // Update current position in the book to match the drag position
+      dispatch({
+        type: 'UPDATE_READING_POSITION',
+        payload: { bookId: currentBook.id, position: newCharacterPosition }
+      });
+      
+      // Update current page based on character position
+      if (currentBook && currentBook.pages && currentBook.pages.length > 0) {
+        const targetPage = currentBook.pages.find(page => 
+          newCharacterPosition >= page.startPosition && newCharacterPosition <= page.endPosition
+        );
+        if (targetPage) {
+          dispatch({
+            type: 'UPDATE_CURRENT_PAGE',
+            payload: { bookId: currentBook.id, page: targetPage.pageNumber },
+          });
+        }
+      }
+      
+      // Optionally scroll to a position that represents the reading progress
+      // This is for visual context, not for progress tracking
       const targetScroll = calculateScrollFromPercentage(dragPosition);
       if (flatListRef.current && targetScroll >= 0) {
-        console.log('📜 Scrolling to position:', targetScroll);
+        setIsScrollingToPosition(true);
+        console.log('📜 Scrolling for visual context to position:', targetScroll);
         flatListRef.current.scrollToOffset({ 
           offset: targetScroll, 
-          animated: true // Use smooth animation on release
+          animated: true
         });
       }
     },
@@ -754,11 +1194,12 @@ export default function ReaderScreen() {
               {...panResponder.panHandlers}
             >
               <View style={styles.progressBar}>
+                {/* Progress bar: Shows exact user position or TTS position - no interpolation */}
                 <View 
                   style={[
                     styles.progressFill, 
                     { 
-                      width: `${(isDragging || isScrollingToPosition ? dragPosition : getCurrentProgressPercentage()) * 100}%`
+                      width: `${(isDragging ? dragPosition : getCurrentProgressPercentage()) * 100}%`
                     }
                   ]} 
                 />
@@ -766,7 +1207,7 @@ export default function ReaderScreen() {
                   style={[
                     styles.progressThumb,
                     { 
-                      left: `${(isDragging || isScrollingToPosition ? dragPosition : getCurrentProgressPercentage()) * 100}%`
+                      left: `${(isDragging ? dragPosition : getCurrentProgressPercentage()) * 100}%`
                     }
                   ]}
                 />
@@ -798,7 +1239,15 @@ export default function ReaderScreen() {
             <TouchableOpacity 
               style={styles.skipButton}
               onPress={() => {
-                // Scroll up (rewind) by a reasonable amount
+                // If TTS is playing, stop it first
+                if (isPlaying) {
+                  stopReading();
+                }
+                
+                // Rewind reading progress by ~5%
+                advanceReadingProgress(-0.05);
+                
+                // Also scroll up for visual context
                 if (flatListRef.current) {
                   const newY = Math.max(0, currentScrollY - 300);
                   flatListRef.current.scrollToOffset({ offset: newY, animated: true });
@@ -822,7 +1271,15 @@ export default function ReaderScreen() {
             <TouchableOpacity 
               style={styles.skipButton}
               onPress={() => {
-                // Scroll down (forward) by a reasonable amount
+                // If TTS is playing, stop it first
+                if (isPlaying) {
+                  stopReading();
+                }
+                
+                // Advance reading progress by ~5%
+                advanceReadingProgress(0.05);
+                
+                // Also scroll down for visual context
                 if (flatListRef.current) {
                   flatListRef.current.scrollToOffset({ offset: currentScrollY + 300, animated: true });
                 }
@@ -869,7 +1326,7 @@ export default function ReaderScreen() {
           
           <ScrollView style={styles.chapterList}>
             {currentBook.chapters && currentBook.chapters.length > 0 ? (
-              currentBook.chapters.map((chapter, index) => (
+              currentBook.chapters.map((chapter) => (
                 <TouchableOpacity
                   key={chapter.id}
                   style={[

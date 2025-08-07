@@ -49,6 +49,14 @@ export default function ReaderScreen() {
   const ttsProgressRef = useRef<NodeJS.Timeout | null>(null);
   const lastTtsProgressRef = useRef<number>(0);
   
+  // Word-level tracking for TTS highlighting
+  const [currentTTSWordPosition, setCurrentTTSWordPosition] = useState<number>(-1);
+  const ttsStartCharIndexRef = useRef<number>(0);
+  const ttsTextRef = useRef<string>('');
+  const ttsWordTrackingRef = useRef<NodeJS.Timeout | null>(null);
+  const lastWordBoundaryRef = useRef<number>(0);
+  const ttsWordsArrayRef = useRef<Array<{start: number, end: number, word: string}>>([]);
+  
   // Loading and content state
   const [isContentLoading, setIsContentLoading] = useState(false);
   const [contentChunks, setContentChunks] = useState<ChunkItem[]>([]);
@@ -69,6 +77,8 @@ export default function ReaderScreen() {
     return () => {
       Speech.stop();
       stopTtsProgressTracking();
+      stopHybridWordTracking();
+      setCurrentTTSWordPosition(-1);
     };
   }, []);
 
@@ -227,29 +237,68 @@ export default function ReaderScreen() {
       }
     });
     
+    // Store TTS text and starting position for word boundary tracking
+    ttsStartCharIndexRef.current = startCharIndex;
+    ttsTextRef.current = textToRead;
+    setCurrentTTSWordPosition(-1); // Reset word position
+    
+    // Pre-analyze all words in the text for precise tracking
+    analyzeWordsInText(textToRead);
+    
     startTtsProgressTracking(remainingWordCount);
+    startHybridWordTracking();
     logCompleteState('TTS STARTED');
 
     Speech.speak(textToRead, {
       rate: settings.speechRate,
       voice: settings.speechVoice,
       language: ttsLanguage,
+      onBoundary: (boundary: any) => {
+        // This callback fires when TTS reaches each word boundary
+        if (boundary && typeof boundary.charIndex === 'number') {
+          const absoluteCharPosition = ttsStartCharIndexRef.current + boundary.charIndex;
+          
+          // Find which word index this boundary corresponds to
+          const wordIndex = ttsWordsArrayRef.current.findIndex(word => 
+            word.start <= absoluteCharPosition && absoluteCharPosition < word.end
+          );
+          
+          if (wordIndex >= 0) {
+            // Update the boundary reference for hybrid tracking
+            lastWordBoundaryRef.current = Math.max(lastWordBoundaryRef.current, wordIndex);
+            setCurrentTTSWordPosition(absoluteCharPosition);
+            
+            console.log('🎯 TTS Word Boundary:', {
+              wordIndex: wordIndex,
+              relativeCharIndex: boundary.charIndex,
+              absoluteCharPosition: absoluteCharPosition,
+              currentWord: ttsWordsArrayRef.current[wordIndex]?.word || 'unknown'
+            });
+          }
+        }
+      },
       onDone: () => {
         console.log('🎵 TTS finished reading remaining content - preserving current progress');
         dispatch({ type: 'SET_PLAYING', payload: false });
         stopTtsProgressTracking();
+        stopHybridWordTracking();
+        setCurrentTTSWordPosition(-1); // Clear word highlighting
         // NEVER change progress on TTS completion - it stays wherever TTS finished reading
       },
       onStopped: () => {
         console.log('🎵 TTS manually stopped - preserving current progress');
         dispatch({ type: 'SET_PLAYING', payload: false });
         stopTtsProgressTracking();
+        stopHybridWordTracking();
+        setCurrentTTSWordPosition(-1); // Clear word highlighting
         // NEVER change progress on manual stop - it stays wherever TTS was paused
       },
       onError: (error) => {
         console.error('TTS Error:', error);
         dispatch({ type: 'SET_PLAYING', payload: false });
         stopTtsProgressTracking();
+        stopHybridWordTracking();
+        setCurrentTTSWordPosition(-1); // Clear word highlighting
         Alert.alert('Speech Error', 'Text-to-speech failed. Try adjusting the language setting.');
       },
     });
@@ -260,6 +309,8 @@ export default function ReaderScreen() {
     
     // Stop TTS tracking FIRST to prevent any final calculations
     stopTtsProgressTracking();
+    stopHybridWordTracking();
+    setCurrentTTSWordPosition(-1); // Clear word highlighting
     
     // Then stop the speech
     Speech.stop();
@@ -423,12 +474,60 @@ export default function ReaderScreen() {
     }
   });
   
+  // Helper function to get the current word position within a chunk
+  const getCurrentWordInChunk = (item: ChunkItem): { wordStart: number; wordEnd: number } | null => {
+    if (!isPlaying || currentTTSWordPosition < 0) return null;
+    
+    // Check if current TTS position is within this chunk
+    if (currentTTSWordPosition >= item.startIndex && currentTTSWordPosition < item.endIndex) {
+      const relativePosition = currentTTSWordPosition - item.startIndex;
+      
+      // Find word boundaries around the current position
+      let wordStart = relativePosition;
+      let wordEnd = relativePosition;
+      
+      // Find start of current word (go backward until we hit whitespace or start of text)
+      while (wordStart > 0 && !/\s/.test(item.text[wordStart - 1])) {
+        wordStart--;
+      }
+      
+      // Find end of current word (go forward until we hit whitespace or end of text)
+      while (wordEnd < item.text.length && !/\s/.test(item.text[wordEnd])) {
+        wordEnd++;
+      }
+      
+      return { wordStart, wordEnd };
+    }
+    
+    return null; // Current position is not in this chunk
+  };
+
+  // Function to render text with word-level highlighting
+  const renderTextWithWordHighlight = (text: string, wordBoundary: { wordStart: number; wordEnd: number } | null) => {
+    if (!wordBoundary) {
+      // No highlighting needed, render normal text
+      return <Text style={[styles.bookText, getTextStyle()]}>{text}</Text>;
+    }
+
+    const beforeHighlight = text.substring(0, wordBoundary.wordStart);
+    const highlightedWord = text.substring(wordBoundary.wordStart, wordBoundary.wordEnd);
+    const afterHighlight = text.substring(wordBoundary.wordEnd);
+
+    return (
+      <Text style={[styles.bookText, getTextStyle()]}>
+        {beforeHighlight}
+        <Text style={[getTextStyle(), styles.highlightedWord]}>{highlightedWord}</Text>
+        {afterHighlight}
+      </Text>
+    );
+  };
+
   const renderChunk = ({ item, index }: { item: ChunkItem; index: number }) => {
+    const currentWordBoundary = getCurrentWordInChunk(item);
+    
     return (
       <View style={styles.chunkContainer}>
-        <Text 
-          key={item.id}
-          style={[styles.bookText, getTextStyle()]}
+        <View
           onLayout={(event) => {
             // Update estimated height based on actual rendered height
             if (index === 0) {
@@ -437,8 +536,8 @@ export default function ReaderScreen() {
             }
           }}
         >
-          {item.text}
-        </Text>
+          {renderTextWithWordHighlight(item.text, currentWordBoundary)}
+        </View>
       </View>
     );
   };
@@ -608,6 +707,93 @@ export default function ReaderScreen() {
       type: 'UPDATE_CURRENT_PAGE',
       payload: { bookId: currentBook.id, page },
     });
+  };
+
+  // Pre-analyze all words in the text for smooth tracking
+  const analyzeWordsInText = (text: string) => {
+    const words: Array<{start: number, end: number, word: string}> = [];
+    
+    // Split text and find exact positions of each word
+    const wordPattern = /\S+/g;
+    let match;
+    
+    while ((match = wordPattern.exec(text)) !== null) {
+      words.push({
+        start: ttsStartCharIndexRef.current + match.index,
+        end: ttsStartCharIndexRef.current + match.index + match[0].length,
+        word: match[0]
+      });
+    }
+    
+    ttsWordsArrayRef.current = words;
+    lastWordBoundaryRef.current = 0;
+    
+    console.log('📝 Pre-analyzed words for TTS tracking:', {
+      totalWords: words.length,
+      firstFewWords: words.slice(0, 5).map(w => w.word),
+      textLength: text.length
+    });
+  };
+
+  // Hybrid word tracking that combines onBoundary with time-based fallback
+  const startHybridWordTracking = () => {
+    if (!currentBook || ttsWordsArrayRef.current.length === 0) return;
+    
+    // Clear any existing tracking
+    if (ttsWordTrackingRef.current) {
+      clearInterval(ttsWordTrackingRef.current);
+    }
+    
+    const speechRate = settings.speechRate;
+    const currentWpm = calculateWordsPerMinute(speechRate);
+    const wordsPerSecond = currentWpm / 60;
+    
+    console.log('🎯 Starting hybrid word tracking:', {
+      totalWords: ttsWordsArrayRef.current.length,
+      wordsPerSecond: wordsPerSecond.toFixed(2),
+      speechRate: speechRate
+    });
+    
+    // Update word position every 100ms for smooth progression
+    ttsWordTrackingRef.current = setInterval(() => {
+      if (!ttsStartTimeRef.current) return;
+      
+      const elapsedSeconds = (Date.now() - ttsStartTimeRef.current) / 1000;
+      const estimatedWordsRead = Math.floor(elapsedSeconds * wordsPerSecond);
+      
+      // Use the boundary-based position if available, otherwise use time-based estimation
+      const targetWordIndex = Math.min(
+        Math.max(lastWordBoundaryRef.current, estimatedWordsRead),
+        ttsWordsArrayRef.current.length - 1
+      );
+      
+      if (targetWordIndex >= 0 && targetWordIndex < ttsWordsArrayRef.current.length) {
+        const currentWord = ttsWordsArrayRef.current[targetWordIndex];
+        setCurrentTTSWordPosition(currentWord.start);
+        
+        // Debug logging every 2 seconds
+        if (Math.floor(elapsedSeconds) % 2 === 0 && Math.floor(elapsedSeconds * 10) % 20 === 0) {
+          console.log('📍 Hybrid word tracking:', {
+            wordIndex: targetWordIndex,
+            currentWord: currentWord.word,
+            boundaryIndex: lastWordBoundaryRef.current,
+            estimatedIndex: estimatedWordsRead,
+            elapsedSeconds: elapsedSeconds.toFixed(1)
+          });
+        }
+      }
+    }, 100);
+  };
+
+  // Stop hybrid word tracking
+  const stopHybridWordTracking = () => {
+    if (ttsWordTrackingRef.current) {
+      clearInterval(ttsWordTrackingRef.current);
+      ttsWordTrackingRef.current = null;
+    }
+    ttsWordsArrayRef.current = [];
+    lastWordBoundaryRef.current = 0;
+    console.log('🛑 Hybrid word tracking stopped');
   };
   
   // Start TTS progress tracking
@@ -893,6 +1079,9 @@ export default function ReaderScreen() {
       }
       if (ttsProgressRef.current) {
         clearInterval(ttsProgressRef.current);
+      }
+      if (ttsWordTrackingRef.current) {
+        clearInterval(ttsWordTrackingRef.current);
       }
     };
   }, []);
@@ -1601,6 +1790,21 @@ const styles = StyleSheet.create({
   },
   chunkContainer: {
     paddingBottom: 4, // Small spacing between chunks
+  },
+  highlightedWord: {
+    backgroundColor: '#2196F3', // Blue background for current word being read
+    color: 'white', // White text for contrast
+    borderRadius: 4,
+    paddingHorizontal: 3,
+    paddingVertical: 1,
+    shadowColor: '#2196F3',
+    shadowOffset: {
+      width: 0,
+      height: 1,
+    },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 2,
   },
   bottomBar: {
     paddingHorizontal: 20,

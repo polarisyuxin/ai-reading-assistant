@@ -59,12 +59,19 @@ export default function ReaderScreen() {
   
   // Loading and content state
   const [isContentLoading, setIsContentLoading] = useState(false);
-  const [contentChunks, setContentChunks] = useState<ChunkItem[]>([]);
+  const [visibleChunks, setVisibleChunks] = useState<ChunkItem[]>([]); // Only chunks needed for current viewport
+  const [currentChunkIndex, setCurrentChunkIndex] = useState(0); // Index of chunk containing current TTS word
+  const [viewportChunkRange, setViewportChunkRange] = useState({ start: 0, end: 0 }); // Range of chunks currently in viewport
   
   const [progressBarWidth, setProgressBarWidth] = useState(300);
   const [isDragging, setIsDragging] = useState(false);
   const [dragPosition, setDragPosition] = useState(0); // Track drag position as percentage (0-1)
   const [isScrollingToPosition, setIsScrollingToPosition] = useState(false); // Track if we're animating scroll from progress bar drag
+  const [isAutoScrolling, setIsAutoScrolling] = useState(false); // Track if we're auto-scrolling during TTS
+  const [showAutoScrollButton, setShowAutoScrollButton] = useState(false); // Show/hide auto-scroll button
+  const [viewportTop, setViewportTop] = useState(0); // Track viewport top position
+  const [viewportHeight, setViewportHeight] = useState(0); // Track viewport height
+  const [actualChunkHeights, setActualChunkHeights] = useState<number[]>([]); // Track actual rendered chunk heights
   const [, setTempPage] = useState(currentBook?.currentPage || 1);
   const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
@@ -358,13 +365,23 @@ export default function ReaderScreen() {
           if (wordIndex >= 0) {
             // Update the boundary reference for hybrid tracking
             lastWordBoundaryRef.current = Math.max(lastWordBoundaryRef.current, wordIndex);
+            const previousPosition = currentTTSWordPosition;
             setCurrentTTSWordPosition(absoluteCharPosition);
+            
+            // Auto-scroll is disabled - only scroll when user clicks the button
+            // if (Math.abs(absoluteCharPosition - previousPosition) > 50) {
+            //   setTimeout(() => {
+            //     autoScrollToCurrentWord();
+            //   }, 10);
+            // }
             
             console.log('🎯 TTS Word Boundary:', {
               wordIndex: wordIndex,
               relativeCharIndex: boundary.charIndex,
               absoluteCharPosition: absoluteCharPosition,
-              currentWord: ttsWordsArrayRef.current[wordIndex]?.word || 'unknown'
+              currentWord: ttsWordsArrayRef.current[wordIndex]?.word || 'unknown',
+              previousPosition: previousPosition,
+              shouldScroll: Math.abs(absoluteCharPosition - previousPosition) > 50
             });
           }
         }
@@ -470,8 +487,9 @@ export default function ReaderScreen() {
     return page;
   };
 
-  // Content chunking constants
-  const CHUNK_SIZE = 2000; // Characters per chunk for optimal performance
+  // Content loading constants
+  const SMALL_CHUNK_SIZE = 500; // Much smaller chunks for precise positioning
+  const VIEWPORT_BUFFER = 3; // Number of chunks to load before/after current position
   
   // Define chunk item type
   interface ChunkItem {
@@ -481,75 +499,146 @@ export default function ReaderScreen() {
     endIndex: number;
   }
   
-  // Asynchronous content chunking to prevent UI blocking
-  const chunkContentAsync = async (content: string): Promise<ChunkItem[]> => {
-    return new Promise((resolve) => {
-      // Use requestIdleCallback or setTimeout to make chunking non-blocking
-      const processChunks = () => {
-        const chunks: ChunkItem[] = [];
-        
-        // Split content at natural break points (sentences/paragraphs) when possible
-        for (let i = 0; i < content.length; i += CHUNK_SIZE) {
-          let endIndex = Math.min(i + CHUNK_SIZE, content.length);
-          
-          // Try to find a natural break point near the end of the chunk
-          if (endIndex < content.length) {
-            const searchEnd = Math.min(endIndex + 200, content.length);
-            const naturalBreaks = ['\n\n', '. ', '! ', '? '];
-            
-            for (const breakPoint of naturalBreaks) {
-              const breakIndex = content.lastIndexOf(breakPoint, searchEnd);
-              if (breakIndex > endIndex - 100 && breakIndex < searchEnd) {
-                endIndex = breakIndex + breakPoint.length;
-                break;
-              }
-            }
-          }
-          
-          const chunk = content.substring(i, endIndex);
-          chunks.push({
-            id: i.toString(),
-            text: chunk,
-            startIndex: i,
-            endIndex: endIndex
-          });
-          
-          // Update i to the actual end index for next iteration
-          i = endIndex - CHUNK_SIZE;
-        }
-        
-        console.log(`📚 Content chunked into ${chunks.length} pieces for smooth scrolling`);
-        resolve(chunks);
-      };
+  // Create smaller, more manageable chunks
+  const createSmallChunks = (content: string): ChunkItem[] => {
+    const chunks: ChunkItem[] = [];
+    
+    for (let i = 0; i < content.length; i += SMALL_CHUNK_SIZE) {
+      let endIndex = Math.min(i + SMALL_CHUNK_SIZE, content.length);
       
-      // Use setTimeout to prevent blocking
-      setTimeout(processChunks, 0);
+      // Find natural break points for better readability
+      if (endIndex < content.length) {
+        const searchEnd = Math.min(endIndex + 100, content.length);
+        const naturalBreaks = ['. ', '! ', '? ', '\n'];
+        
+        for (const breakPoint of naturalBreaks) {
+          const breakIndex = content.lastIndexOf(breakPoint, searchEnd);
+          if (breakIndex > endIndex - 50 && breakIndex < searchEnd) {
+            endIndex = breakIndex + breakPoint.length;
+            break;
+          }
+        }
+      }
+      
+      chunks.push({
+        id: `chunk-${chunks.length}`,
+        text: content.substring(i, endIndex),
+        startIndex: i,
+        endIndex: endIndex
+      });
+      
+      i = endIndex - SMALL_CHUNK_SIZE;
+    }
+    
+    return chunks;
+  };
+
+  // Get chunks around the current TTS position for efficient loading
+  const getVisibleChunksAroundPosition = (allChunks: ChunkItem[], ttsPosition: number): { chunks: ChunkItem[], currentIndex: number } => {
+    if (!allChunks.length) return { chunks: [], currentIndex: 0 };
+    
+    // Find chunk containing current TTS position
+    const currentIndex = allChunks.findIndex(chunk => 
+      ttsPosition >= chunk.startIndex && ttsPosition < chunk.endIndex
+    );
+    
+    if (currentIndex === -1) {
+      // Fallback to first few chunks if position not found
+      return {
+        chunks: allChunks.slice(0, Math.min(VIEWPORT_BUFFER * 2 + 1, allChunks.length)),
+        currentIndex: 0
+      };
+    }
+    
+    // Load current chunk plus buffer before and after
+    const startIndex = Math.max(0, currentIndex - VIEWPORT_BUFFER);
+    const endIndex = Math.min(allChunks.length, currentIndex + VIEWPORT_BUFFER + 1);
+    
+    const visibleChunks = allChunks.slice(startIndex, endIndex);
+    const adjustedCurrentIndex = currentIndex - startIndex;
+    
+    console.log(`📱 Loading ${visibleChunks.length} chunks around position ${ttsPosition}:`, {
+      totalChunks: allChunks.length,
+      currentChunkIndex: currentIndex,
+      visibleRange: `${startIndex}-${endIndex-1}`,
+      adjustedCurrentIndex
     });
+    
+    return {
+      chunks: visibleChunks,
+      currentIndex: adjustedCurrentIndex
+    };
   };
   
-  // Load content chunks when book changes
+  // Store all chunks for the book (created once)
+  const [allBookChunks, setAllBookChunks] = useState<ChunkItem[]>([]);
+
+  // Create chunks when book changes
   useEffect(() => {
     if (currentBook?.content && currentBook.id !== lastBookId) {
-      console.log('🚀 Starting content processing for smooth transition');
+      console.log('🚀 Creating small chunks for efficient loading');
       setIsContentLoading(true);
-      setContentChunks([]); // Clear previous chunks immediately
       
-      // Start chunking process
-      chunkContentAsync(currentBook.content)
-        .then((chunks) => {
-          setContentChunks(chunks);
-          setIsContentLoading(false);
-          console.log('✅ Content ready for smooth scrolling');
-        })
-        .catch((error) => {
-          console.error('❌ Error chunking content:', error);
-          setIsContentLoading(false);
-        });
+      const chunks = createSmallChunks(currentBook.content);
+      setAllBookChunks(chunks);
+      
+      // Load initial visible chunks around current position
+      const initialPosition = Math.floor(readingProgress * currentBook.content.length);
+      const { chunks: initialVisible, currentIndex } = getVisibleChunksAroundPosition(chunks, initialPosition);
+      
+      setVisibleChunks(initialVisible);
+      setCurrentChunkIndex(currentIndex);
+      setIsContentLoading(false);
+      
+      console.log(`✅ Created ${chunks.length} small chunks, loaded ${initialVisible.length} initially`);
     } else if (!currentBook?.content) {
-      setContentChunks([]);
+      setAllBookChunks([]);
+      setVisibleChunks([]);
+      setCurrentChunkIndex(0);
       setIsContentLoading(false);
     }
-  }, [currentBook?.content, currentBook?.id, lastBookId]);
+  }, [currentBook?.content, currentBook?.id, lastBookId, readingProgress]);
+
+  // Update visible chunks when TTS position changes significantly
+  useEffect(() => {
+    if (isPlaying && currentTTSWordPosition >= 0 && allBookChunks.length > 0) {
+      // Find which chunk in all chunks contains the TTS position
+      const globalChunkIndex = allBookChunks.findIndex(chunk => 
+        currentTTSWordPosition >= chunk.startIndex && currentTTSWordPosition < chunk.endIndex
+      );
+      
+      if (globalChunkIndex === -1) return;
+      
+      // Check if this chunk is already in our visible range
+      const chunkInVisible = visibleChunks.findIndex(chunk => chunk.id === allBookChunks[globalChunkIndex].id);
+      
+      if (chunkInVisible === -1) {
+        // TTS moved to a chunk not currently loaded - load chunks around it
+        const { chunks, currentIndex } = getVisibleChunksAroundPosition(allBookChunks, currentTTSWordPosition);
+        
+        setVisibleChunks(chunks);
+        setCurrentChunkIndex(currentIndex);
+        
+        console.log('🔄 TTS moved to new area - loaded chunks:', {
+          ttsPosition: currentTTSWordPosition,
+          globalChunkIndex,
+          newCurrentIndex: currentIndex,
+          visibleChunksCount: chunks.length
+        });
+      } else {
+        // Update current index to point to the correct chunk in visible range
+        if (chunkInVisible !== currentChunkIndex) {
+          setCurrentChunkIndex(chunkInVisible);
+          
+          console.log('🔄 Updated current chunk index in visible range:', {
+            oldIndex: currentChunkIndex,
+            newIndex: chunkInVisible,
+            chunkId: visibleChunks[chunkInVisible]?.id
+          });
+        }
+      }
+    }
+  }, [currentTTSWordPosition, isPlaying, allBookChunks, currentChunkIndex, visibleChunks]);
   
   // iOS-specific text styling
   const getTextStyle = () => Platform.select({
@@ -594,6 +683,183 @@ export default function ReaderScreen() {
     return null; // Current position is not in this chunk
   };
 
+  // Auto-scroll to center the currently spoken word in the middle of viewport
+  const autoScrollToCurrentWord = useCallback((forceScroll = false) => {
+    if ((!isPlaying && !forceScroll) || currentTTSWordPosition < 0 || !flatListRef.current || !currentBook?.content) {
+      console.log('🚫 Auto-scroll skipped:', {
+        isPlaying,
+        forceScroll,
+        currentTTSWordPosition,
+        hasFlatListRef: !!flatListRef.current,
+        hasContent: !!currentBook?.content
+      });
+      return;
+    }
+
+    // Find the chunk containing current TTS word in visible chunks
+    const visibleChunkIndex = visibleChunks.findIndex(chunk => 
+      currentTTSWordPosition >= chunk.startIndex && currentTTSWordPosition < chunk.endIndex
+    );
+    
+    if (visibleChunkIndex >= 0) {
+      setIsAutoScrolling(true);
+      
+      console.log('🎯 Auto-scrolling to center current TTS chunk:', {
+        visibleChunkIndex,
+        currentTTSWordPosition,
+        chunkRange: `${visibleChunks[visibleChunkIndex].startIndex}-${visibleChunks[visibleChunkIndex].endIndex}`,
+        visibleChunksCount: visibleChunks.length,
+        chunkId: visibleChunks[visibleChunkIndex].id,
+        forceScroll,
+        method: 'FlatList.scrollToIndex with recalculated index'
+      });
+      
+      // Center the chunk containing the current word using the correct FlatList index
+      flatListRef.current.scrollToIndex({
+        index: visibleChunkIndex, // Use the index in visible chunks array
+        viewPosition: 0.5, // Center the chunk in viewport
+        animated: true,
+      });
+      
+      // Hide auto-scroll button temporarily after manual scroll
+      if (forceScroll) {
+        setShowAutoScrollButton(false);
+        setTimeout(() => {
+          setShowAutoScrollButton(isPlaying);
+        }, 2000);
+      }
+      
+      // Reset auto-scrolling flag after animation
+      setTimeout(() => {
+        setIsAutoScrolling(false);
+      }, 500);
+    } else {
+      console.log('🚫 Current TTS word not in visible chunks - reloading around position:', {
+        currentTTSWordPosition,
+        visibleChunksCount: visibleChunks.length,
+        allChunksCount: allBookChunks.length,
+        visibleRange: visibleChunks.length > 0 ? `${visibleChunks[0].startIndex}-${visibleChunks[visibleChunks.length-1].endIndex}` : 'empty'
+      });
+      
+      // Force update visible chunks around current TTS position
+      if (allBookChunks.length > 0) {
+        const { chunks, currentIndex } = getVisibleChunksAroundPosition(allBookChunks, currentTTSWordPosition);
+        setVisibleChunks(chunks);
+        setCurrentChunkIndex(currentIndex);
+        
+        // After loading, try auto-scroll again with a slight delay
+        setTimeout(() => {
+          if (forceScroll) {
+            autoScrollToCurrentWord(true);
+          }
+        }, 100);
+      }
+    }
+  }, [isPlaying, currentTTSWordPosition, visibleChunks, estimatedItemHeight, containerHeight, currentBook?.content]);
+
+  // Auto-scroll is disabled - only scroll when user clicks the button
+  // useEffect(() => {
+  //   if (isPlaying && currentTTSWordPosition >= 0) {
+  //     const timeoutId = setTimeout(() => {
+  //       autoScrollToCurrentWord();
+  //     }, 200);
+  //     
+  //     return () => clearTimeout(timeoutId);
+  //   }
+  // }, [currentTTSWordPosition, isPlaying, autoScrollToCurrentWord]);
+
+  // Show auto-scroll button when TTS is playing
+  useEffect(() => {
+    setShowAutoScrollButton(isPlaying);
+  }, [isPlaying]);
+
+  // Handle scroll events, track viewport position, and load chunks as needed
+  const handleScrollWithButton = (event: any) => {
+    const { contentOffset } = event.nativeEvent;
+    const scrollY = contentOffset.y;
+    
+    // Update viewport position for yellow highlight
+    setViewportTop(scrollY);
+    
+    // Calculate which chunks are currently in viewport
+    if (estimatedItemHeight > 0 && allBookChunks.length > 0) {
+      const viewportTop = scrollY;
+      const viewportBottom = scrollY + containerHeight;
+      
+      // Calculate chunk indices that are visible
+      const startChunkIndex = Math.floor(viewportTop / estimatedItemHeight);
+      const endChunkIndex = Math.min(
+        Math.ceil(viewportBottom / estimatedItemHeight),
+        visibleChunks.length - 1
+      );
+      
+      setViewportChunkRange({ start: startChunkIndex, end: endChunkIndex });
+      
+      // Check if we need to load more chunks based on scroll position
+      const needsMoreChunks = checkAndLoadMoreChunks(startChunkIndex, endChunkIndex);
+      
+      if (needsMoreChunks) {
+        console.log('📜 User scroll triggered chunk loading:', {
+          viewportRange: `${startChunkIndex}-${endChunkIndex}`,
+          scrollY,
+          containerHeight,
+          estimatedItemHeight
+        });
+      }
+    }
+    
+    handleScroll(event);
+  };
+
+  // Check if we need to load more chunks based on current viewport
+  const checkAndLoadMoreChunks = (viewportStart: number, viewportEnd: number): boolean => {
+    if (!allBookChunks.length || !visibleChunks.length) return false;
+    
+    // Get the absolute chunk indices in the full book
+    const firstVisibleChunk = allBookChunks.findIndex(chunk => chunk.id === visibleChunks[0].id);
+    const lastVisibleChunk = allBookChunks.findIndex(chunk => chunk.id === visibleChunks[visibleChunks.length - 1].id);
+    
+    if (firstVisibleChunk === -1 || lastVisibleChunk === -1) return false;
+    
+    // Check if viewport is getting close to the edges of loaded chunks
+    const bufferThreshold = 1; // Load more when within 1 chunk of edge
+    
+    let needsUpdate = false;
+    let newStartIndex = firstVisibleChunk;
+    let newEndIndex = lastVisibleChunk;
+    
+    // Check if we need chunks before current range
+    if (viewportStart <= bufferThreshold) {
+      newStartIndex = Math.max(0, firstVisibleChunk - VIEWPORT_BUFFER);
+      needsUpdate = newStartIndex !== firstVisibleChunk;
+    }
+    
+    // Check if we need chunks after current range
+    if (viewportEnd >= visibleChunks.length - bufferThreshold - 1) {
+      newEndIndex = Math.min(allBookChunks.length - 1, lastVisibleChunk + VIEWPORT_BUFFER);
+      needsUpdate = needsUpdate || newEndIndex !== lastVisibleChunk;
+    }
+    
+    if (needsUpdate) {
+      const newVisibleChunks = allBookChunks.slice(newStartIndex, newEndIndex + 1);
+      const adjustedCurrentIndex = Math.max(0, currentChunkIndex + (newStartIndex - firstVisibleChunk));
+      
+      setVisibleChunks(newVisibleChunks);
+      setCurrentChunkIndex(adjustedCurrentIndex);
+      
+      console.log('🔄 Auto-loaded chunks due to scroll:', {
+        oldRange: `${firstVisibleChunk}-${lastVisibleChunk}`,
+        newRange: `${newStartIndex}-${newEndIndex}`,
+        newVisibleCount: newVisibleChunks.length,
+        adjustedCurrentIndex
+      });
+      
+      return true;
+    }
+    
+    return false;
+  };
+
   // Function to render text with word-level highlighting
   const renderTextWithWordHighlight = (text: string, wordBoundary: { wordStart: number; wordEnd: number } | null) => {
     if (!wordBoundary) {
@@ -621,11 +887,19 @@ export default function ReaderScreen() {
       <View style={styles.chunkContainer}>
         <View
           onLayout={(event) => {
-            // Update estimated height based on actual rendered height
+            const { height } = event.nativeEvent.layout;
+            
+            // Update estimated height based on first chunk
             if (index === 0) {
-              const { height } = event.nativeEvent.layout;
               setEstimatedItemHeight(height);
             }
+            
+            // Store actual height for each chunk
+            setActualChunkHeights(prev => {
+              const newHeights = [...prev];
+              newHeights[index] = height;
+              return newHeights;
+            });
           }}
         >
           {renderTextWithWordHighlight(item.text, currentWordBoundary)}
@@ -660,16 +934,21 @@ export default function ReaderScreen() {
     }
 
     // Show empty content only while initially loading (no skeleton UI)
-    if (contentChunks.length === 0 && isContentLoading) {
+    if (visibleChunks.length === 0 && isContentLoading) {
       return <View style={styles.textContent} />;
     }
 
-    console.log('📱 Rendering optimized content with', contentChunks.length, 'chunks');
+    console.log('📱 Rendering efficient content:', {
+      visibleChunks: visibleChunks.length,
+      totalChunks: allBookChunks.length,
+      currentChunkIndex,
+      viewportRange: `${viewportChunkRange.start}-${viewportChunkRange.end}`
+    });
     
     return (
       <FlatList
         ref={flatListRef}
-        data={contentChunks}
+        data={visibleChunks}
         renderItem={renderChunk}
         keyExtractor={(item) => item.id}
         removeClippedSubviews={true}
@@ -684,12 +963,14 @@ export default function ReaderScreen() {
         })}
         showsVerticalScrollIndicator={true}
         scrollEventThrottle={16}
-        onScroll={handleScroll}
+        onScroll={handleScrollWithButton}
         onMomentumScrollEnd={handleScrollEnd}
+        scrollEnabled={true} // Allow user scrolling at all times
         onContentSizeChange={(width, height) => setContentHeight(height)}
         onLayout={(event) => {
           const { height } = event.nativeEvent.layout;
           setContainerHeight(height);
+          setViewportHeight(height); // Track viewport height for yellow highlight
         }}
         contentContainerStyle={styles.textContent}
       />
@@ -896,7 +1177,10 @@ export default function ReaderScreen() {
       
       if (targetWordIndex >= 0 && targetWordIndex < ttsWordsArrayRef.current.length) {
         const currentWord = ttsWordsArrayRef.current[targetWordIndex];
-        setCurrentTTSWordPosition(currentWord.start);
+        const newWordPosition = currentWord.start;
+        
+        // Update word position
+        setCurrentTTSWordPosition(newWordPosition);
         
         // Debug logging every 2 seconds
         if (Math.floor(elapsedSeconds) % 2 === 0 && Math.floor(elapsedSeconds * 10) % 20 === 0) {
@@ -905,7 +1189,8 @@ export default function ReaderScreen() {
             currentWord: currentWord.word,
             boundaryIndex: lastWordBoundaryRef.current,
             estimatedIndex: estimatedWordsRead,
-            elapsedSeconds: elapsedSeconds.toFixed(1)
+            elapsedSeconds: elapsedSeconds.toFixed(1),
+            wordPosition: newWordPosition
           });
         }
       }
@@ -1436,17 +1721,31 @@ export default function ReaderScreen() {
         }
       }
       
-      // Optionally scroll to a position that represents the reading progress
-      // This is for visual context, not for progress tracking
-      const targetScroll = calculateScrollFromPercentage(dragPosition);
-      if (flatListRef.current && targetScroll >= 0) {
-        setIsScrollingToPosition(true);
-        console.log('📜 Scrolling for visual context to position:', targetScroll);
-        flatListRef.current.scrollToOffset({ 
-          offset: targetScroll, 
-          animated: true
-        });
-      }
+      // Center the current reading position in viewport after progress bar drag
+      // Update TTS word position to match new character position for proper centering
+      setCurrentTTSWordPosition(newCharacterPosition);
+      
+      // Use a timeout to ensure state updates complete before auto-scroll
+      setTimeout(() => {
+        // Load chunks around the new position if needed
+        if (allBookChunks.length > 0) {
+          const { chunks, currentIndex } = getVisibleChunksAroundPosition(allBookChunks, newCharacterPosition);
+          setVisibleChunks(chunks);
+          setCurrentChunkIndex(currentIndex);
+          
+          // Center the new reading position
+          setTimeout(() => {
+            autoScrollToCurrentWord(true);
+          }, 100);
+          
+          console.log('📜 Progress bar drag: centered new reading position:', {
+            newCharacterPosition,
+            newProgress: (dragPosition * 100).toFixed(2) + '%',
+            loadedChunks: chunks.length,
+            currentIndex
+          });
+        }
+      }, 50);
     },
   });
 
@@ -1490,6 +1789,17 @@ export default function ReaderScreen() {
 
       <View style={[styles.contentArea, styles.textContainer]}>
         {renderContent()}
+        
+        {/* Auto-scroll button */}
+        {showAutoScrollButton && isPlaying && (
+          <TouchableOpacity 
+            style={styles.autoScrollButton}
+            onPress={() => autoScrollToCurrentWord(true)}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="arrow-down" size={20} color="white" />
+          </TouchableOpacity>
+        )}
       </View>
 
       <View style={styles.bottomBar}>
@@ -2377,5 +2687,25 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: 'white',
     fontWeight: '600',
+  },
+  autoScrollButton: {
+    position: 'absolute',
+    right: 20,
+    bottom: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(0, 122, 255, 0.9)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 8,
+    zIndex: 999,
   },
 });

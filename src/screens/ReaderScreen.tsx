@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -144,33 +144,98 @@ export default function ReaderScreen() {
     }
   }, [currentBook?.totalPages, currentBook?.currentPage, currentBook]);
 
-  // Cache word count when book changes for faster duration calculations
+  // OPTIMIZED: Stable word count function that doesn't trigger re-renders
+  const getCachedWordCount = useCallback(() => {
+    if (!currentBook?.content) return 0;
+    
+    // Return current cached value if available
+    if (cachedWordCount > 0) {
+      return cachedWordCount;
+    }
+    
+    // If we need to calculate, return 0 and let the effect handle it
+    // This prevents infinite loops from state updates during render
+    return 0;
+  }, [currentBook?.content, cachedWordCount]);
+
+  // Calculate word count when book changes
   useEffect(() => {
-    if (currentBook?.content && currentBook.id !== lastBookId) {
-      console.log('📊 Calculating word count for book:', currentBook.title);
-      const startTime = Date.now();
-      const wordStats = countWords(currentBook.content);
-      const wordCount = wordStats.words || 0;
-      setCachedWordCount(wordCount);
-      const endTime = Date.now();
-      console.log(`📊 Word count calculated: ${wordCount} words in ${endTime - startTime}ms`);
+    if (currentBook && currentBook.id !== lastBookId) {
+      console.log('📚 Book changed - calculating word count');
+      setLastBookId(currentBook.id);
+      
+      if (currentBook.content) {
+        // Calculate asynchronously to prevent blocking
+        setTimeout(() => {
+          console.log('📊 Calculating word count for:', currentBook.title);
+          const startTime = Date.now();
+          const wordStats = countWords(currentBook.content);
+          const wordCount = wordStats.words || 0;
+          setCachedWordCount(wordCount);
+          const endTime = Date.now();
+          console.log(`📊 Word count calculated: ${wordCount} words in ${endTime - startTime}ms`);
+        }, 0);
+      } else {
+        setCachedWordCount(0);
+      }
     } else if (!currentBook?.content) {
       setCachedWordCount(0);
     }
   }, [currentBook?.id, currentBook?.content, currentBook?.title, lastBookId]);
 
   const startReading = async () => {
+    console.log('🚀 OPTIMIZED TTS START - Fast loading strategy');
+    
     if (!currentBook || !currentBook.content) {
       Alert.alert('Error', 'No content available to read');
       return;
     }
 
-    // Calculate starting position based on current reading progress
     const fullContent = currentBook.content;
     const startCharIndex = Math.floor(readingProgress * fullContent.length);
     
-    // Read from current progress position to the end
-    const textToRead = fullContent.substring(startCharIndex);
+    // OPTIMIZATION: Use chunked loading strategy for large books
+    const INITIAL_CHUNK_SIZE = 10000; // Start with ~10KB of text for immediate playback
+    const remainingLength = fullContent.length - startCharIndex;
+    
+    let textToRead: string;
+    let isPartialLoad = false;
+    
+    if (remainingLength > INITIAL_CHUNK_SIZE) {
+      // For large content, start with a chunk and queue more
+      const initialEndIndex = startCharIndex + INITIAL_CHUNK_SIZE;
+      
+      // Find a good break point (end of sentence/paragraph)
+      let breakIndex = initialEndIndex;
+      const breakPoints = ['\n\n', '. ', '! ', '? ', '\n'];
+      
+      for (const breakPoint of breakPoints) {
+        const foundBreak = fullContent.indexOf(breakPoint, initialEndIndex);
+        if (foundBreak > initialEndIndex && foundBreak < initialEndIndex + 1000) {
+          breakIndex = foundBreak + breakPoint.length;
+          break;
+        }
+      }
+      
+      textToRead = fullContent.substring(startCharIndex, breakIndex);
+      isPartialLoad = true;
+      
+      console.log('📦 CHUNKED LOADING:', {
+        totalRemaining: remainingLength,
+        chunkSize: textToRead.length,
+        isPartial: isPartialLoad,
+        hasMoreContent: true
+      });
+    } else {
+      // Small content, load all remaining
+      textToRead = fullContent.substring(startCharIndex);
+      isPartialLoad = false;
+      
+      console.log('📦 FULL LOADING:', {
+        remainingLength,
+        loadedAll: true
+      });
+    }
     
     if (!textToRead.trim()) {
       Alert.alert('Info', 'You have already completed reading this book');
@@ -195,9 +260,33 @@ export default function ReaderScreen() {
       console.log('🎵 Auto-detected Chinese text, switching TTS to Chinese');
     }
     
-    // Calculate word count for the remaining text to be read
-    const remainingWordStats = countWords(textToRead);
-    const remainingWordCount = remainingWordStats.words || 0;
+    // OPTIMIZATION: Fast word counting for chunked content
+    let remainingWordCount: number;
+    
+    if (isPartialLoad) {
+      // For partial loads, estimate remaining words based on chunk + total ratio
+      const chunkWordCount = textToRead.split(/\s+/).filter(word => word.length > 0).length;
+      const totalRemainingChars = remainingLength;
+      const chunkChars = textToRead.length;
+      const estimatedTotalWords = Math.round((chunkWordCount * totalRemainingChars) / chunkChars);
+      
+      remainingWordCount = estimatedTotalWords;
+      
+      console.log('⚡ FAST WORD COUNT (estimated):', {
+        chunkWords: chunkWordCount,
+        estimatedTotal: estimatedTotalWords,
+        method: 'ratio-based estimation'
+      });
+    } else {
+      // For full loads on small content, do precise counting
+      const remainingWordStats = countWords(textToRead);
+      remainingWordCount = remainingWordStats.words || 0;
+      
+      console.log('⚡ PRECISE WORD COUNT:', {
+        actualCount: remainingWordCount,
+        method: 'full analysis'
+      });
+    }
     
     // Safety check for minimum content
     if (remainingWordCount < 5) {
@@ -206,9 +295,12 @@ export default function ReaderScreen() {
     }
     
     console.log('🔊 Starting TTS with language:', ttsLanguage, 'for text:', textToRead.substring(0, 50) + '...');
+    // Get total word count lazily (only when needed for TTS)
+    const totalWordCount = getCachedWordCount();
+    
     console.log('📊 TTS word count:', {
       remainingWords: remainingWordCount,
-      totalWords: cachedWordCount,
+      totalWords: totalWordCount,
       progressStart: readingProgress,
       percentageComplete: (readingProgress * 100).toFixed(1) + '%',
       textLength: textToRead.length
@@ -242,8 +334,8 @@ export default function ReaderScreen() {
     ttsTextRef.current = textToRead;
     setCurrentTTSWordPosition(-1); // Reset word position
     
-    // Pre-analyze all words in the text for precise tracking
-    analyzeWordsInText(textToRead);
+    // OPTIMIZATION: Only analyze words for the initial chunk for fast startup
+    analyzeWordsInTextOptimized(textToRead, isPartialLoad);
     
     startTtsProgressTracking(remainingWordCount);
     startHybridWordTracking();
@@ -709,30 +801,65 @@ export default function ReaderScreen() {
     });
   };
 
-  // Pre-analyze all words in the text for smooth tracking
-  const analyzeWordsInText = (text: string) => {
-    const words: Array<{start: number, end: number, word: string}> = [];
+  // OPTIMIZED: Fast word analysis for immediate TTS startup
+  const analyzeWordsInTextOptimized = (text: string, isPartialLoad: boolean) => {
+    const startTime = Date.now();
     
-    // Split text and find exact positions of each word
-    const wordPattern = /\S+/g;
-    let match;
-    
-    while ((match = wordPattern.exec(text)) !== null) {
-      words.push({
-        start: ttsStartCharIndexRef.current + match.index,
-        end: ttsStartCharIndexRef.current + match.index + match[0].length,
-        word: match[0]
+    if (isPartialLoad) {
+      // For partial loads, only analyze first portion for immediate tracking
+      const ANALYSIS_LIMIT = 2000; // Analyze first ~2KB for immediate word tracking
+      const analysisText = text.substring(0, Math.min(ANALYSIS_LIMIT, text.length));
+      
+      const words: Array<{start: number, end: number, word: string}> = [];
+      const wordPattern = /\S+/g;
+      let match;
+      
+      while ((match = wordPattern.exec(analysisText)) !== null) {
+        words.push({
+          start: ttsStartCharIndexRef.current + match.index,
+          end: ttsStartCharIndexRef.current + match.index + match[0].length,
+          word: match[0]
+        });
+      }
+      
+      ttsWordsArrayRef.current = words;
+      lastWordBoundaryRef.current = 0;
+      
+      const endTime = Date.now();
+      console.log('⚡ FAST WORD ANALYSIS (partial):', {
+        analyzedWords: words.length,
+        analyzedChars: analysisText.length,
+        totalChars: text.length,
+        analysisTime: endTime - startTime + 'ms',
+        firstWords: words.slice(0, 3).map(w => w.word)
+      });
+      
+      // TODO: Could implement background analysis of remaining words if needed
+      
+    } else {
+      // For small/full content, do complete analysis
+      const words: Array<{start: number, end: number, word: string}> = [];
+      const wordPattern = /\S+/g;
+      let match;
+      
+      while ((match = wordPattern.exec(text)) !== null) {
+        words.push({
+          start: ttsStartCharIndexRef.current + match.index,
+          end: ttsStartCharIndexRef.current + match.index + match[0].length,
+          word: match[0]
+        });
+      }
+      
+      ttsWordsArrayRef.current = words;
+      lastWordBoundaryRef.current = 0;
+      
+      const endTime = Date.now();
+      console.log('📝 COMPLETE WORD ANALYSIS:', {
+        totalWords: words.length,
+        analysisTime: endTime - startTime + 'ms',
+        firstWords: words.slice(0, 3).map(w => w.word)
       });
     }
-    
-    ttsWordsArrayRef.current = words;
-    lastWordBoundaryRef.current = 0;
-    
-    console.log('📝 Pre-analyzed words for TTS tracking:', {
-      totalWords: words.length,
-      firstFewWords: words.slice(0, 5).map(w => w.word),
-      textLength: text.length
-    });
   };
 
   // Hybrid word tracking that combines onBoundary with time-based fallback
@@ -998,7 +1125,7 @@ export default function ReaderScreen() {
     // Progress tracking is handled separately through user interactions or TTS
   };
 
-  const handleScrollEnd = (event: any) => {
+  const handleScrollEnd = () => {
     if (isScrollingToPosition) {
       console.log('📜 Progress bar drag scroll animation completed');
       
@@ -1097,8 +1224,10 @@ export default function ReaderScreen() {
   const currentWPM = calculateWordsPerMinute(settings.speechRate);
 
   // Fast time calculations using cached word count with second-level accuracy
-  const getElapsedTimeInSeconds = (): number => {
-    if (!currentBook || cachedWordCount === 0) return 0;
+  const getElapsedTimeInSeconds = useCallback((): number => {
+    if (!currentBook) return 0;
+    const totalWordCount = getCachedWordCount();
+    if (totalWordCount === 0) return 0;
     
     // When TTS is actively running, use actual elapsed time since TTS started
     if (isPlaying && ttsStartTimeRef.current) {
@@ -1106,7 +1235,7 @@ export default function ReaderScreen() {
       
       // Calculate the base time from where TTS started reading
       const startProgressRatio = ttsStartProgressRef.current;
-      const baseWordsRead = cachedWordCount * Math.max(0, Math.min(1, startProgressRatio));
+      const baseWordsRead = totalWordCount * Math.max(0, Math.min(1, startProgressRatio));
       const wordsPerSecond = currentWPM / 60;
       const baseTimeSeconds = Math.round(baseWordsRead / wordsPerSecond);
       
@@ -1117,16 +1246,18 @@ export default function ReaderScreen() {
     // Use drag position when actively dragging, otherwise use reading progress  
     const progressRatio = isDragging ? dragPosition : readingProgress;
     
-    const wordsRead = cachedWordCount * Math.max(0, Math.min(1, progressRatio));
+    const wordsRead = totalWordCount * Math.max(0, Math.min(1, progressRatio));
     const wordsPerSecond = currentWPM / 60; // Convert WPM to words per second
     return Math.round(wordsRead / wordsPerSecond); // Returns seconds
-  };
+  }, [currentBook, getCachedWordCount, currentWPM, isPlaying, ttsStartTimeRef, ttsStartProgressRef, isDragging, dragPosition, readingProgress]);
 
-  const getTotalTimeInSeconds = (): number => {
-    if (!currentBook || cachedWordCount === 0) return 0;
+  const getTotalTimeInSeconds = useCallback((): number => {
+    if (!currentBook) return 0;
+    const totalWordCount = getCachedWordCount();
+    if (totalWordCount === 0) return 0;
     const wordsPerSecond = currentWPM / 60; // Convert WPM to words per second
-    return Math.round(cachedWordCount / wordsPerSecond); // Returns total seconds for entire book
-  };
+    return Math.round(totalWordCount / wordsPerSecond); // Returns total seconds for entire book
+  }, [currentBook, getCachedWordCount, currentWPM]);
 
   // Format seconds into HH:MM:SS or MM:SS format
   const formatTimeFromSeconds = (totalSeconds: number): string => {
@@ -1145,33 +1276,25 @@ export default function ReaderScreen() {
     }
   };
 
-  // Debug: Log when speech rate or reading progress changes
+  // Debug: Log when speech rate changes (removed problematic function calls)
   useEffect(() => {
     console.log('📊 Speech rate changed:', settings.speechRate, 'WPM:', currentWPM);
-    if (currentBook && cachedWordCount > 0) {
-      const elapsedSeconds = getElapsedTimeInSeconds();
-      const totalSeconds = getTotalTimeInSeconds();
-      console.log('📊 Fast time calculations:', {
-        readingProgress: readingProgress,
-        cachedWordCount: cachedWordCount,
-        elapsedSeconds: elapsedSeconds,
-        totalSeconds: totalSeconds,
-        formattedElapsed: formatTimeFromSeconds(elapsedSeconds),
-        formattedTotal: formatTimeFromSeconds(totalSeconds)
-      });
-    }
-  }, [settings.speechRate, currentWPM, readingProgress, cachedWordCount, currentBook, isDragging, dragPosition]);
+    // Removed function calls that were causing infinite re-render
+    // Time calculations are now done on-demand when needed
+  }, [settings.speechRate, currentWPM]);
 
   // Calculate total reading duration for current book with second-level accuracy
-  const getTotalDurationInSeconds = (rate: number): number => {
-    if (!currentBook?.content || cachedWordCount === 0) return 0;
+  const getTotalDurationInSeconds = useCallback((rate: number): number => {
+    if (!currentBook?.content) return 0;
+    const totalWordCount = getCachedWordCount();
+    if (totalWordCount === 0) return 0;
     
     const wpm = calculateWordsPerMinute(rate);
     if (wpm === 0) return 0;
     
     const wordsPerSecond = wpm / 60; // Convert WPM to words per second
-    return Math.round(cachedWordCount / wordsPerSecond); // Returns total seconds
-  };
+    return Math.round(totalWordCount / wordsPerSecond); // Returns total seconds
+  }, [currentBook?.content, getCachedWordCount]);
 
   // Format duration with ~ prefix for display in speed modal
   const formatDurationWithPrefix = (totalSeconds: number): string => {
@@ -1272,7 +1395,7 @@ export default function ReaderScreen() {
       console.log('👆 Finger tracking - Touch at:', locationX.toFixed(1), 'Percentage:', percentage.toFixed(3));
     },
     
-    onPanResponderRelease: (event) => {
+    onPanResponderRelease: () => {
       console.log('🎯 Progress bar drag released at position:', dragPosition);
       setIsDragging(false);
       

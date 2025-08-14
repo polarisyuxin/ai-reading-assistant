@@ -55,6 +55,7 @@ export default function ReaderScreen() {
   const ttsTextRef = useRef<string>('');
   const ttsWordTrackingRef = useRef<NodeJS.Timeout | null>(null);
   const lastWordBoundaryRef = useRef<number>(0);
+  const currentWordIndexRef = useRef<number>(-1); // Track current word index for monotonic progression
   const ttsWordsArrayRef = useRef<Array<{start: number, end: number, word: string}>>([]);
   
   // Loading and content state
@@ -72,12 +73,10 @@ export default function ReaderScreen() {
   const [viewportTop, setViewportTop] = useState(0); // Track viewport top position
   const [viewportHeight, setViewportHeight] = useState(0); // Track viewport height
   const [actualChunkHeights, setActualChunkHeights] = useState<number[]>([]); // Track actual rendered chunk heights
-  const [, setTempPage] = useState(currentBook?.currentPage || 1);
   const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
   
   // Track content size for scroll-based progress
-  const [contentHeight, setContentHeight] = useState(0);
   const [containerHeight, setContainerHeight] = useState(0);
 
   useEffect(() => {
@@ -86,6 +85,7 @@ export default function ReaderScreen() {
       stopTtsProgressTracking();
       stopHybridWordTracking();
       setCurrentTTSWordPosition(-1);
+      currentWordIndexRef.current = -1;
     };
   }, []);
 
@@ -115,12 +115,8 @@ export default function ReaderScreen() {
   useEffect(() => {
     if (currentBook) {
       console.log('📖 Current book updated:', {
-        title: currentBook.title,
-        currentPage: currentBook.currentPage,
-        totalPages: currentBook.totalPages,
-        pagesLength: currentBook.pages?.length
+        title: currentBook.title
       });
-      setTempPage(currentBook.currentPage);
       
       // Initialize reading progress based on character position (character-based positioning)
       if (currentBook.totalLength > 0 && currentBook.currentPosition >= 0) {
@@ -132,9 +128,7 @@ export default function ReaderScreen() {
           book: {
             title: currentBook.title,
             currentPosition: currentBook.currentPosition,
-            totalLength: currentBook.totalLength,
-            currentPage: currentBook.currentPage,
-            totalPages: currentBook.totalPages
+            totalLength: currentBook.totalLength
           },
           progressBar: {
             characterBasedPercentage: (progress * 100).toFixed(2) + '%',
@@ -149,7 +143,7 @@ export default function ReaderScreen() {
         });
       }
     }
-  }, [currentBook?.totalPages, currentBook?.currentPage, currentBook]);
+  }, [currentBook]);
 
   // OPTIMIZED: Stable word count function that doesn't trigger re-renders
   const getCachedWordCount = useCallback(() => {
@@ -325,9 +319,7 @@ export default function ReaderScreen() {
         percentageIntoBook: ((startCharIndex / fullContent.length) * 100).toFixed(2) + '%'
       },
       progressLocation: {
-        progressBarPercentage: (readingProgress * 100).toFixed(2) + '%',
-        currentPage: currentBook.currentPage,
-        totalPages: currentBook.totalPages
+        progressBarPercentage: (readingProgress * 100).toFixed(2) + '%'
       },
       ttsContent: {
         remainingWords: remainingWordCount,
@@ -340,6 +332,7 @@ export default function ReaderScreen() {
     ttsStartCharIndexRef.current = startCharIndex;
     ttsTextRef.current = textToRead;
     setCurrentTTSWordPosition(-1); // Reset word position
+    currentWordIndexRef.current = -1; // Reset word index for monotonic progression
     
     // OPTIMIZATION: Only analyze words for the initial chunk for fast startup
     analyzeWordsInTextOptimized(textToRead, isPartialLoad);
@@ -357,31 +350,46 @@ export default function ReaderScreen() {
         if (boundary && typeof boundary.charIndex === 'number') {
           const absoluteCharPosition = ttsStartCharIndexRef.current + boundary.charIndex;
           
-          // Find which word index this boundary corresponds to
-          const wordIndex = ttsWordsArrayRef.current.findIndex(word => 
-            word.start <= absoluteCharPosition && absoluteCharPosition < word.end
-          );
+          // Find the NEXT word index that starts at or after this position (forward-only progression)
+          let nextWordIndex = -1;
+          for (let i = Math.max(0, currentWordIndexRef.current); i < ttsWordsArrayRef.current.length; i++) {
+            const word = ttsWordsArrayRef.current[i];
+            if (word.start >= absoluteCharPosition) {
+              nextWordIndex = i;
+              break;
+            }
+            // If we're within this word's range and it's forward progress, use it
+            if (word.start <= absoluteCharPosition && absoluteCharPosition < word.end && i > currentWordIndexRef.current) {
+              nextWordIndex = i;
+              break;
+            }
+          }
           
-          if (wordIndex >= 0) {
-            // Update the boundary reference for hybrid tracking
-            lastWordBoundaryRef.current = Math.max(lastWordBoundaryRef.current, wordIndex);
-            const previousPosition = currentTTSWordPosition;
-            setCurrentTTSWordPosition(absoluteCharPosition);
+          // Only update if we found a valid forward progression
+          if (nextWordIndex >= 0 && nextWordIndex > currentWordIndexRef.current) {
+            const currentWord = ttsWordsArrayRef.current[nextWordIndex];
+            currentWordIndexRef.current = nextWordIndex;
+            lastWordBoundaryRef.current = nextWordIndex;
             
-            // Auto-scroll is disabled - only scroll when user clicks the button
-            // if (Math.abs(absoluteCharPosition - previousPosition) > 50) {
-            //   setTimeout(() => {
-            //     autoScrollToCurrentWord();
-            //   }, 10);
-            // }
+            setCurrentTTSWordPosition(currentWord.start);
             
-            console.log('🎯 TTS Word Boundary:', {
-              wordIndex: wordIndex,
+            // Update boundary time to prevent fallback from activating
+            lastBoundaryUpdateTimeRef.current = Date.now();
+            
+            console.log('🎯 TTS Word Boundary (Forward-Only):', {
+              wordIndex: nextWordIndex,
               relativeCharIndex: boundary.charIndex,
               absoluteCharPosition: absoluteCharPosition,
-              currentWord: ttsWordsArrayRef.current[wordIndex]?.word || 'unknown',
-              previousPosition: previousPosition,
-              shouldScroll: Math.abs(absoluteCharPosition - previousPosition) > 50
+              currentWord: currentWord.word,
+              wordStart: currentWord.start,
+              progression: 'FORWARD'
+            });
+          } else if (nextWordIndex <= currentWordIndexRef.current) {
+            console.log('🚫 TTS Word Boundary ignored (would move backwards):', {
+              nextWordIndex,
+              currentWordIndex: currentWordIndexRef.current,
+              absoluteCharPosition: absoluteCharPosition,
+              progression: 'BLOCKED'
             });
           }
         }
@@ -392,6 +400,7 @@ export default function ReaderScreen() {
         stopTtsProgressTracking();
         stopHybridWordTracking();
         setCurrentTTSWordPosition(-1); // Clear word highlighting
+        currentWordIndexRef.current = -1; // Reset word index
         // NEVER change progress on TTS completion - it stays wherever TTS finished reading
       },
       onStopped: () => {
@@ -400,6 +409,7 @@ export default function ReaderScreen() {
         stopTtsProgressTracking();
         stopHybridWordTracking();
         setCurrentTTSWordPosition(-1); // Clear word highlighting
+        currentWordIndexRef.current = -1; // Reset word index
         // NEVER change progress on manual stop - it stays wherever TTS was paused
       },
       onError: (error) => {
@@ -408,6 +418,7 @@ export default function ReaderScreen() {
         stopTtsProgressTracking();
         stopHybridWordTracking();
         setCurrentTTSWordPosition(-1); // Clear word highlighting
+        currentWordIndexRef.current = -1; // Reset word index
         Alert.alert('Speech Error', 'Text-to-speech failed. Try adjusting the language setting.');
       },
     });
@@ -420,6 +431,7 @@ export default function ReaderScreen() {
     stopTtsProgressTracking();
     stopHybridWordTracking();
     setCurrentTTSWordPosition(-1); // Clear word highlighting
+    currentWordIndexRef.current = -1; // Reset word index
     
     // Then stop the speech
     Speech.stop();
@@ -429,10 +441,6 @@ export default function ReaderScreen() {
     logCompleteState('TTS PAUSED/STOPPED');
   };
 
-  const handleTextSelection = (text: string) => {
-    setSelectedText(text);
-    setShowAIModal(true);
-  };
 
   const addBookmark = () => {
     if (!currentBook) return;
@@ -451,41 +459,7 @@ export default function ReaderScreen() {
     Alert.alert('Bookmark Added', 'Your current position has been bookmarked.');
   };
 
-  const renderFirstPage = () => {
-    if (!currentBook || !currentBook.pages || currentBook.pages.length === 0) {
-      console.log('📄 No pages available to render');
-      return;
-    }
 
-    const firstPage = currentBook.pages[0];
-    console.log('📄 FIRST PAGE RENDER:');
-    console.log('📖 Book:', currentBook.title);
-    console.log('📄 Page Number:', firstPage.pageNumber);
-    console.log('📝 Content Length:', firstPage.content.length);
-    console.log('📋 Content Preview (first 200 chars):', firstPage.content.substring(0, 200) + '...');
-    console.log('📄 Full First Page Content:');
-    console.log('━'.repeat(50));
-    console.log(firstPage.content);
-    console.log('━'.repeat(50));
-    
-    Alert.alert(
-      'First Page Rendered',
-      `First page content logged to console.\n\nPage: ${firstPage.pageNumber}\nLength: ${firstPage.content.length} characters\n\nCheck your development console for the full content.`
-    );
-  };
-
-  const getCurrentPage = () => {
-    if (!currentBook || !currentBook.pages || currentBook.pages.length === 0) {
-      console.log('getCurrentPage: No book or pages available');
-      return null;
-    }
-    
-    console.log('getCurrentPage: Looking for page', currentBook.currentPage, 'in', currentBook.pages.length, 'pages');
-    const page = currentBook.pages.find(page => page.pageNumber === currentBook.currentPage) || currentBook.pages[0];
-    console.log('getCurrentPage: Found page:', page?.pageNumber, 'content length:', page?.content.length);
-    
-    return page;
-  };
 
   // Content loading constants
   const SMALL_CHUNK_SIZE = 500; // Much smaller chunks for precise positioning
@@ -956,7 +930,7 @@ export default function ReaderScreen() {
         windowSize={10}
         initialNumToRender={3}
         updateCellsBatchingPeriod={50}
-        getItemLayout={(data, index) => ({
+        getItemLayout={(_data, index) => ({
           length: estimatedItemHeight,
           offset: estimatedItemHeight * index,
           index,
@@ -966,7 +940,7 @@ export default function ReaderScreen() {
         onScroll={handleScrollWithButton}
         onMomentumScrollEnd={handleScrollEnd}
         scrollEnabled={true} // Allow user scrolling at all times
-        onContentSizeChange={(width, height) => setContentHeight(height)}
+        onContentSizeChange={() => {}}
         onLayout={(event) => {
           const { height } = event.nativeEvent.layout;
           setContainerHeight(height);
@@ -981,20 +955,10 @@ export default function ReaderScreen() {
     navigation.navigate('Library' as never);
   };
 
-  const goToChapter = (chapterStartPage: number) => {
-    if (!currentBook) return;
+  const goToChapter = (chapterIndex: number) => {
+    if (!currentBook || !currentBook.chapters[chapterIndex]) return;
     
-    // Find the chapter by startPage
-    const selectedChapter = currentBook.chapters.find(chapter => chapter.startPage === chapterStartPage);
-    if (!selectedChapter) {
-      console.warn('Chapter not found for page:', chapterStartPage);
-      return;
-    }
-    
-    dispatch({
-      type: 'UPDATE_CURRENT_PAGE',
-      payload: { bookId: currentBook.id, page: chapterStartPage },
-    });
+    const selectedChapter = currentBook.chapters[chapterIndex];
     
     // DIRECT POSITION SET: Jump immediately to chapter position using character-based positioning
     if (currentBook.totalLength > 0 && selectedChapter.startPosition >= 0) {
@@ -1012,7 +976,6 @@ export default function ReaderScreen() {
         action: 'User selected chapter',
         chapterTitle: selectedChapter.title,
         chapterStartPosition: selectedChapter.startPosition,
-        chapterStartPage: chapterStartPage,
         selectedPosition: (progress * 100).toFixed(2) + '%',
         behavior: 'Jump directly - no interpolation'
       });
@@ -1054,33 +1017,8 @@ export default function ReaderScreen() {
     });
     
     logCompleteState('MANUAL CONTROL COMPLETED');
-    
-    // Update current page based on new character position
-    if (currentBook.pages && currentBook.pages.length > 0) {
-      const targetPage = currentBook.pages.find(page => 
-        newCharacterPosition >= page.startPosition && newCharacterPosition <= page.endPosition
-      );
-      if (targetPage) {
-        dispatch({
-          type: 'UPDATE_CURRENT_PAGE',
-          payload: { bookId: currentBook.id, page: targetPage.pageNumber },
-        });
-      }
-    }
   };
   
-  // Function to set reading progress to a specific value
-  const setReadingProgressToPage = (page: number) => {
-    if (!currentBook || currentBook.totalPages === 0) return;
-    
-    const progress = (page - 1) / currentBook.totalPages;
-    setReadingProgress(Math.max(0, Math.min(1, progress)));
-    
-    dispatch({
-      type: 'UPDATE_CURRENT_PAGE',
-      payload: { bookId: currentBook.id, page },
-    });
-  };
 
   // OPTIMIZED: Fast word analysis for immediate TTS startup
   const analyzeWordsInTextOptimized = (text: string, isPartialLoad: boolean) => {
@@ -1143,7 +1081,10 @@ export default function ReaderScreen() {
     }
   };
 
-  // Hybrid word tracking that combines onBoundary with time-based fallback
+  // Store last boundary update time at module level for access in onBoundary
+  const lastBoundaryUpdateTimeRef = useRef<number>(Date.now());
+  
+  // Simplified forward-only word tracking fallback
   const startHybridWordTracking = () => {
     if (!currentBook || ttsWordsArrayRef.current.length === 0) return;
     
@@ -1156,45 +1097,50 @@ export default function ReaderScreen() {
     const currentWpm = calculateWordsPerMinute(speechRate);
     const wordsPerSecond = currentWpm / 60;
     
-    console.log('🎯 Starting hybrid word tracking:', {
+    console.log('🎯 Starting forward-only word tracking fallback:', {
       totalWords: ttsWordsArrayRef.current.length,
       wordsPerSecond: wordsPerSecond.toFixed(2),
       speechRate: speechRate
     });
     
-    // Update word position every 100ms for smooth progression
+    // Reset boundary update time
+    lastBoundaryUpdateTimeRef.current = Date.now();
+    
     ttsWordTrackingRef.current = setInterval(() => {
       if (!ttsStartTimeRef.current) return;
       
-      const elapsedSeconds = (Date.now() - ttsStartTimeRef.current) / 1000;
-      const estimatedWordsRead = Math.floor(elapsedSeconds * wordsPerSecond);
+      const now = Date.now();
+      const timeSinceLastBoundary = (now - lastBoundaryUpdateTimeRef.current) / 1000;
       
-      // Use the boundary-based position if available, otherwise use time-based estimation
-      const targetWordIndex = Math.min(
-        Math.max(lastWordBoundaryRef.current, estimatedWordsRead),
-        ttsWordsArrayRef.current.length - 1
-      );
-      
-      if (targetWordIndex >= 0 && targetWordIndex < ttsWordsArrayRef.current.length) {
-        const currentWord = ttsWordsArrayRef.current[targetWordIndex];
-        const newWordPosition = currentWord.start;
-        
-        // Update word position
-        setCurrentTTSWordPosition(newWordPosition);
-        
-        // Debug logging every 2 seconds
-        if (Math.floor(elapsedSeconds) % 2 === 0 && Math.floor(elapsedSeconds * 10) % 20 === 0) {
-          console.log('📍 Hybrid word tracking:', {
-            wordIndex: targetWordIndex,
-            currentWord: currentWord.word,
-            boundaryIndex: lastWordBoundaryRef.current,
-            estimatedIndex: estimatedWordsRead,
-            elapsedSeconds: elapsedSeconds.toFixed(1),
-            wordPosition: newWordPosition
-          });
-        }
+      // Only use fallback if onBoundary hasn't fired for 2+ seconds
+      if (timeSinceLastBoundary < 2.0) {
+        return; // Let onBoundary handle it
       }
-    }, 100);
+      
+      // Conservative advancement - move only one word at a time
+      const nextWordIndex = currentWordIndexRef.current + 1;
+      
+      if (nextWordIndex >= 0 && 
+          nextWordIndex < ttsWordsArrayRef.current.length) {
+        
+        const currentWord = ttsWordsArrayRef.current[nextWordIndex];
+        
+        // Update position conservatively
+        currentWordIndexRef.current = nextWordIndex;
+        lastWordBoundaryRef.current = nextWordIndex;
+        setCurrentTTSWordPosition(currentWord.start);
+        
+        // Reset boundary update time when fallback activates
+        lastBoundaryUpdateTimeRef.current = now;
+        
+        console.log('📍 Conservative fallback activated (onBoundary silent for 2s):', {
+          wordIndex: nextWordIndex,
+          currentWord: currentWord.word,
+          timeSinceLastBoundary: timeSinceLastBoundary.toFixed(1),
+          source: 'CONSERVATIVE_FALLBACK'
+        });
+      }
+    }, 500);
   };
 
   // Stop hybrid word tracking
@@ -1205,7 +1151,8 @@ export default function ReaderScreen() {
     }
     ttsWordsArrayRef.current = [];
     lastWordBoundaryRef.current = 0;
-    console.log('🛑 Hybrid word tracking stopped');
+    currentWordIndexRef.current = -1; // Reset word index
+    console.log('🛑 Forward-only word tracking stopped');
   };
   
   // Start TTS progress tracking
@@ -1342,7 +1289,7 @@ export default function ReaderScreen() {
         });
       }
       
-      // Update current page and position based on TTS progress using CHARACTER-BASED positioning
+      // Update position based on TTS progress using CHARACTER-BASED positioning
       if (book && book.totalLength > 0) {
         const newCharacterPosition = Math.floor(newProgress * book.totalLength);
         
@@ -1352,18 +1299,6 @@ export default function ReaderScreen() {
           payload: { bookId: book.id, position: newCharacterPosition }
         });
         
-        // Update current page based on character position
-        if (book.pages && book.pages.length > 0) {
-          const targetPage = book.pages.find(page => 
-            newCharacterPosition >= page.startPosition && newCharacterPosition <= page.endPosition
-          );
-          if (targetPage) {
-            dispatch({
-              type: 'UPDATE_CURRENT_PAGE',
-              payload: { bookId: book.id, page: targetPage.pageNumber },
-            });
-          }
-        }
       }
     }, 100); // Update every 100ms for smooth progress bar movement
   };
@@ -1599,10 +1534,6 @@ export default function ReaderScreen() {
   };
 
 
-  const calculateScrollFromPercentage = (percentage: number): number => {
-    const maxScroll = Math.max(0, contentHeight - containerHeight);
-    return percentage * maxScroll;
-  };
 
   const getCurrentProgressPercentage = (): number => {
     // Return reading progress (independent of scroll position)
@@ -1628,8 +1559,6 @@ export default function ReaderScreen() {
         percentageRead: (readingProgress * 100).toFixed(2) + '%'
       },
       bookState: {
-        currentPage: currentBook.currentPage,
-        totalPages: currentBook.totalPages,
         title: currentBook.title
       },
       ttsState: {
@@ -1708,18 +1637,6 @@ export default function ReaderScreen() {
         payload: { bookId: currentBook.id, position: newCharacterPosition }
       });
       
-      // Update current page based on character position
-      if (currentBook && currentBook.pages && currentBook.pages.length > 0) {
-        const targetPage = currentBook.pages.find(page => 
-          newCharacterPosition >= page.startPosition && newCharacterPosition <= page.endPosition
-        );
-        if (targetPage) {
-          dispatch({
-            type: 'UPDATE_CURRENT_PAGE',
-            payload: { bookId: currentBook.id, page: targetPage.pageNumber },
-          });
-        }
-      }
       
       // Center the current reading position in viewport after progress bar drag
       // Update TTS word position to match new character position for proper centering
@@ -1956,36 +1873,35 @@ export default function ReaderScreen() {
           
           <ScrollView style={styles.chapterList}>
             {currentBook.chapters && currentBook.chapters.length > 0 ? (
-              currentBook.chapters.map((chapter) => (
-                <TouchableOpacity
-                  key={chapter.id}
-                  style={[
-                    styles.chapterItem,
-                    currentBook.currentPage >= chapter.startPage && 
-                    (!chapter.endPage || currentBook.currentPage <= chapter.endPage) && 
-                    styles.currentChapterItem
-                  ]}
-                  onPress={() => goToChapter(chapter.startPage)}
-                >
-                  <View style={styles.chapterInfo}>
-                    <Text style={styles.chapterTitle}>{chapter.title}</Text>
-                    <Text style={styles.chapterPages}>
-                      Page {chapter.startPage}
-                      {chapter.endPage && ` - ${chapter.endPage}`}
-                    </Text>
-                  </View>
-                  <Ionicons 
-                    name="chevron-forward" 
-                    size={20} 
-                    color={
-                      currentBook.currentPage >= chapter.startPage && 
-                      (!chapter.endPage || currentBook.currentPage <= chapter.endPage)
-                        ? "#007AFF" 
-                        : "#ccc"
-                    } 
-                  />
-                </TouchableOpacity>
-              ))
+              currentBook.chapters.map((chapter, index) => {
+                const currentCharPosition = Math.floor(readingProgress * currentBook.totalLength);
+                const isCurrentChapter = currentCharPosition >= chapter.startPosition && 
+                  (index === currentBook.chapters.length - 1 || 
+                   currentCharPosition < currentBook.chapters[index + 1].startPosition);
+                
+                return (
+                  <TouchableOpacity
+                    key={chapter.id}
+                    style={[
+                      styles.chapterItem,
+                      isCurrentChapter && styles.currentChapterItem
+                    ]}
+                    onPress={() => goToChapter(index)}
+                  >
+                    <View style={styles.chapterInfo}>
+                      <Text style={styles.chapterTitle}>{chapter.title}</Text>
+                      <Text style={styles.chapterPosition}>
+                        {Math.round((chapter.startPosition / currentBook.totalLength) * 100)}% through book
+                      </Text>
+                    </View>
+                    <Ionicons 
+                      name="chevron-forward" 
+                      size={20} 
+                      color={isCurrentChapter ? "#007AFF" : "#ccc"} 
+                    />
+                  </TouchableOpacity>
+                );
+              })
             ) : (
               <View style={styles.noChaptersContainer}>
                 <Ionicons name="book-outline" size={48} color="#ccc" />
@@ -2485,7 +2401,7 @@ const styles = StyleSheet.create({
     color: '#333',
     marginBottom: 4,
   },
-  chapterPages: {
+  chapterPosition: {
     fontSize: 13,
     color: '#666',
   },

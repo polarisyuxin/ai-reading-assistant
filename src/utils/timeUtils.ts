@@ -74,8 +74,9 @@ export function formatTime(minutes: number): string {
 
 /**
  * Calculate words per minute based on speech rate
- * 1.0x = 200 WPM (base rate)
+ * 1.0x = 160 WPM (conservative base rate to account for pauses)
+ * Reduced from 200 to better match actual TTS timing
  */
 export function calculateWordsPerMinute(speechRate: number): number {
-  return Math.round(200 * speechRate);
+  return Math.round(160 * speechRate);
 }
